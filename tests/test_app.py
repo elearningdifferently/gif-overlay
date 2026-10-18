@@ -1,0 +1,245 @@
+"""HTTP contracts for the editor, uploads, and download responses."""
+
+import io
+import json
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
+
+import pytest
+from PIL import Image, ImageSequence
+from werkzeug.test import EnvironBuilder
+
+import app as app_module
+from test_gif_overlay import DURATIONS, frames_of, make_gif, make_png, pixels
+
+
+class EditorHTML(HTMLParser):
+    def __init__(self, html):
+        super().__init__()
+        self.scripts = []
+        self.stylesheets = []
+        self.config_chunks = []
+        self.in_config = False
+        self.config_count = 0
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script":
+            if attrs.get("src"):
+                self.scripts.append(attrs["src"])
+            self.in_config = attrs.get("id") == "editor-config"
+            if self.in_config:
+                self.config_count += 1
+                assert attrs.get("type") == "application/json"
+        elif tag == "link" and attrs.get("rel") == "stylesheet":
+            self.stylesheets.append(attrs.get("href"))
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.in_config = False
+
+    def handle_data(self, data):
+        if self.in_config:
+            self.config_chunks.append(data)
+
+    @property
+    def config(self):
+        assert self.config_count == 1
+        return json.loads("".join(self.config_chunks))
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.setitem(app_module.app.config, "TESTING", True)
+    return app_module.app.test_client()
+
+
+def upload_data(**options):
+    return {
+        "gif": (io.BytesIO(make_gif()), "my animation.gif"),
+        "overlay": (io.BytesIO(make_png()), "logo.png"),
+        **options,
+    }
+
+
+def assert_user_error(response, message, status=400):
+    assert response.status_code == status
+    assert response.mimetype == "application/json"
+    assert message.lower() in response.get_json()["error"].lower()
+
+
+def test_editor_config_and_static_assets(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+    page = EditorHTML(response.get_data(as_text=True))
+    assert page.config == {
+        "maxUploadMb": app_module.MAX_UPLOAD_MB,
+        "analyzeUrl": "/analyze",
+        "overlayUrl": "/overlay",
+    }
+    script_urls = [url for url in page.scripts if urlsplit(url).path.endswith("/editor.js")]
+    style_urls = [url for url in page.stylesheets if urlsplit(url).path.endswith("/editor.css")]
+    assert script_urls
+    assert style_urls
+    for url in script_urls + style_urls:
+        asset = client.get(url)
+        assert asset.status_code == 200
+        assert asset.data
+
+
+def test_editor_config_cannot_break_out_of_json_script(client, monkeypatch):
+    injected = '</script><script>alert("unsafe")</script>&\''
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_MB", injected)
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert injected not in html
+    assert EditorHTML(html).config["maxUploadMb"] == injected
+
+
+def test_health_is_json(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_analyze_returns_complete_metadata(client):
+    response = client.post(
+        "/analyze", data={"gif": (io.BytesIO(make_gif(loop=3)), "animation.gif")}
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.get_json() == {
+        "width": 80,
+        "height": 60,
+        "frame_count": 5,
+        "durations": DURATIONS,
+        "total_duration": sum(DURATIONS),
+        "loop": 3,
+        "max_colors": 2,
+        "has_transparency": False,
+        "is_animated": True,
+    }
+
+
+def test_overlay_download_has_safe_filename_and_composited_frames(client):
+    data = upload_data(position="bottom-right", margin="2")
+    data["gif"] = (io.BytesIO(make_gif()), "../../my animation.gif")
+    response = client.post("/overlay", data=data)
+    assert response.status_code == 200
+    assert response.mimetype == "image/gif"
+    assert response.headers["Content-Disposition"] == (
+        "attachment; filename=my_animation-overlay.gif"
+    )
+    assert response.headers["X-Gif-Frames"] == "5"
+    assert response.headers["X-Gif-Size"] == "80x60"
+    result = Image.open(io.BytesIO(response.data))
+    assert result.format == "GIF"
+    assert result.size == (80, 60)
+    assert result.n_frames == 5
+    assert result.info["loop"] == 0
+    assert [frame.info["duration"] for frame in ImageSequence.Iterator(result)] == DURATIONS
+    green = Image.new("RGBA", (20, 20), (0, 255, 0, 255))
+    for source, output in zip(frames_of(make_gif()), frames_of(response.data)):
+        source.alpha_composite(green, (58, 38))
+        assert pixels(output) == pixels(source)
+
+
+@pytest.mark.parametrize("route,field", [
+    ("/analyze", "gif"), ("/overlay", "gif"), ("/overlay", "overlay"),
+])
+@pytest.mark.parametrize("case", ["missing", "no-filename", "empty", "invalid"])
+def test_rejects_missing_empty_and_invalid_uploads(client, route, field, case):
+    data = upload_data() if route == "/overlay" else {
+        "gif": (io.BytesIO(make_gif()), "animation.gif")
+    }
+    if case == "missing":
+        del data[field]
+        message = f"'{field}'"
+    elif case == "no-filename":
+        data[field] = (io.BytesIO(b"data"), "")
+        message = f"'{field}'"
+    elif case == "empty":
+        data[field] = (io.BytesIO(b""), "empty.gif")
+        message = "empty"
+    else:
+        data[field] = (io.BytesIO(b"not an image"), "invalid.gif")
+        message = "could not read"
+    assert_user_error(client.post(route, data=data), message)
+
+
+@pytest.mark.parametrize("route", ["/analyze", "/overlay"])
+def test_rejects_non_gif_base_even_with_gif_extension(client, route):
+    data = upload_data()
+    data["gif"] = (io.BytesIO(make_png()), "pretend.gif")
+    assert_user_error(client.post(route, data=data), "base image must be a GIF")
+
+
+@pytest.mark.parametrize("field", ["x", "y", "margin", "scale", "opacity"])
+@pytest.mark.parametrize("value", ["not-a-number", "NaN", "inf", "-inf", "1e999"])
+def test_rejects_invalid_numeric_options(client, field, value):
+    response = client.post("/overlay", data=upload_data(**{field: value}))
+    assert_user_error(response, f"'{field}' must be a number")
+
+
+@pytest.mark.parametrize("options,message", [
+    ({"position": "nowhere"}, "invalid position"),
+    ({"scale": "-1"}, "scale"),
+    ({"scale": "1001"}, "scale"),
+    ({"opacity": "-1"}, "opacity"),
+    ({"opacity": "101"}, "opacity"),
+    ({"margin": "-1"}, "margin"),
+])
+def test_rejects_out_of_range_options(client, options, message):
+    assert_user_error(client.post("/overlay", data=upload_data(**options)), message)
+
+
+def test_blank_numeric_options_use_defaults(client):
+    response = client.post(
+        "/overlay",
+        data=upload_data(**{field: "  " for field in ("x", "y", "margin", "scale", "opacity")}),
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "image/gif"
+
+
+@pytest.mark.parametrize("route", ["/analyze", "/overlay"])
+def test_request_limit_includes_multipart_overhead(client, monkeypatch, route):
+    data = upload_data() if route == "/overlay" else {
+        "gif": (io.BytesIO(make_gif()), "animation.gif")
+    }
+    payload_bytes = sum(len(value[0].getvalue()) for value in data.values())
+    builder = EnvironBuilder(path=route, method="POST", data=data)
+    try:
+        environ = builder.get_environ()
+        request_bytes = int(environ["CONTENT_LENGTH"])
+        assert request_bytes > payload_bytes
+        monkeypatch.setitem(app_module.app.config, "MAX_CONTENT_LENGTH", request_bytes - 1)
+        assert_user_error(client.open(environ), "upload too large", status=413)
+    finally:
+        builder.close()
+
+
+def test_request_limit_applies_to_combined_uploads(client, monkeypatch):
+    # Valid image decoders ignore trailing padding; each upload alone fits,
+    # including its multipart envelope, while their combined request does not.
+    gif = make_gif() + b"\0" * 4096
+    overlay = make_png() + b"\0" * 4096
+    limit = len(gif) + len(overlay) - 1
+    for field, content in (("gif", gif), ("overlay", overlay)):
+        builder = EnvironBuilder(
+            method="POST", data={field: (io.BytesIO(content), "image.gif")}
+        )
+        try:
+            assert int(builder.get_environ()["CONTENT_LENGTH"]) < limit
+        finally:
+            builder.close()
+    monkeypatch.setitem(app_module.app.config, "MAX_CONTENT_LENGTH", limit)
+    data = {
+        "gif": (io.BytesIO(gif), "animation.gif"),
+        "overlay": (io.BytesIO(overlay), "logo.png"),
+    }
+    assert_user_error(client.post("/overlay", data=data), "upload too large", status=413)
