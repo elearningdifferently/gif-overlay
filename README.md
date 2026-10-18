@@ -100,8 +100,11 @@ public hostname exists or is routed correctly. Preserve the existing
    assigned URL, timestamps, resolver outputs and deployment logs. App dashboard
    or provider access is required to establish or repair that assignment.
    Do not create DNS records for DigitalOcean's `ondigitalocean.app` domain.
-5. Once DNS resolves, verify the **web service** has public ingress at `/`,
-   forwards to the app's HTTP port **8080**, and uses `/health` for health
+5. The app spec's web service `http_port: 8080` and `/health` health check were
+   reviewed and preserved. Verify the assigned deployment's public `/` ingress
+   in the dashboard; no spec routing change is needed without evidence that
+   routing is missing. Once DNS resolves, verify ingress forwards to HTTP port
+   **8080** and uses `/health` for health
    checks. Visit the assigned Live App URL and its `/health` path; the latter
    should return `{"status":"ok"}`. HTTP routing, health-check or server errors
    can only be investigated after DNS succeeds.
@@ -145,7 +148,13 @@ image-processing memory safeguard.
   labels, and accessible progress/error announcements without a mouse.
 - **Mobile:** use a narrow viewport and touch input; check readable controls,
   usable file pickers, previews and downloads without horizontal overflow.
+- **Reduced motion:** enable the operating system's reduced-motion preference
+  and check that nonessential transitions/animations are suppressed.
 - **Errors:** try empty/corrupt files, a non-GIF base, an invalid overlay,
   excessive combined uploads and invalid numeric options. Simulate an offline
   connection, a server failure and a non-JSON error response; show an actionable
   error, clear busy state and allow retry without stale downloads.
+
+Native file-dialog interaction and real mobile/cross-browser behavior remain
+manually unverified; browser automation and viewport emulation do not replace
+those checks.
