@@ -1,0 +1,22 @@
+# DigitalOcean App Platform spec.
+# Deploy with: doctl apps create --spec .do/app.yaml
+# (update `github.repo` / `branch` if you deploy from a fork)
+name: gif-overlay
+services:
+  - name: web
+    github:
+      repo: elearningdifferently/gif-overlay
+      branch: main
+      deploy_on_push: true
+    environment_slug: python
+    run_command: gunicorn --worker-tmp-dir /dev/shm --workers 2 --timeout 120 --bind 0.0.0.0:8080 app:app
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /health
+    envs:
+      - key: MAX_UPLOAD_MB
+        value: "50"
+      - key: MAX_PIXELS
+        value: "150000000"

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GIF Overlay</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { margin-bottom: .25rem; }
+    fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 1rem 0; padding: 1rem; }
+    label { display: block; margin: .5rem 0 .25rem; font-weight: 600; }
+    input[type=number], select { width: 10rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+    .previews { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+    .previews figure { margin: 0; }
+    .previews img { max-width: 260px; max-height: 260px; border: 1px solid #ddd; background: repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 16px 16px; }
+    #info { font-size: .9rem; background: #f6f6f6; padding: .5rem 1rem; border-radius: 6px; }
+    #error { color: #b00020; font-weight: 600; }
+    button { font-size: 1rem; padding: .5rem 1.25rem; cursor: pointer; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>GIF Overlay</h1>
+  <p>Upload an animated GIF and an image (PNG, GIF, JPEG, WebP&hellip;). The image is placed on top of every frame and
+    the result is exported as an animated GIF with the original size, frame timing, loop count and transparency.</p>
+
+  <form id="form">
+    <fieldset>
+      <legend>Files (max {{ max_upload_mb }} MB each request)</legend>
+      <label for="gif">Animated GIF</label>
+      <input id="gif" name="gif" type="file" accept="image/gif" required>
+      <div id="info" class="hidden"></div>
+      <label for="overlay">Overlay image</label>
+      <input id="overlay" name="overlay" type="file" accept="image/*" required>
+    </fieldset>
+
+    <fieldset>
+      <legend>Placement</legend>
+      <div class="row">
+        <div>
+          <label for="position">Position</label>
+          <select id="position" name="position">
+            {% for p in positions %}<option value="{{ p }}" {% if p == 'center' %}selected{% endif %}>{{ p }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="margin">Margin (px)</label>
+          <input id="margin" name="margin" type="number" min="0" value="0">
+        </div>
+        <div class="custom hidden">
+          <label for="x">X (px)</label>
+          <input id="x" name="x" type="number" value="0">
+        </div>
+        <div class="custom hidden">
+          <label for="y">Y (px)</label>
+          <input id="y" name="y" type="number" value="0">
+        </div>
+        <div>
+          <label for="scale">Width (% of GIF, 0 = original)</label>
+          <input id="scale" name="scale" type="number" min="0" max="1000" step="any" value="0">
+        </div>
+        <div>
+          <label for="opacity">Opacity (%)</label>
+          <input id="opacity" name="opacity" type="number" min="0" max="100" step="any" value="100">
+        </div>
+      </div>
+    </fieldset>
+
+    <button type="submit" id="submit">Create GIF</button>
+    <p id="error"></p>
+  </form>
+
+  <div class="previews">
+    <figure id="result-fig" class="hidden">
+      <figcaption>Result &ndash; <a id="download" href="#">Download</a></figcaption>
+      <img id="result" alt="Result GIF">
+    </figure>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const errorEl = $("error");
+
+    async function errorText(res) {
+      try { return (await res.json()).error || res.statusText; } catch { return res.statusText; }
+    }
+
+    $("position").addEventListener("change", (e) => {
+      document.querySelectorAll(".custom").forEach((el) =>
+        el.classList.toggle("hidden", e.target.value !== "custom"));
+    });
+
+    $("gif").addEventListener("change", async () => {
+      const info = $("info");
+      info.classList.add("hidden");
+      errorEl.textContent = "";
+      const file = $("gif").files[0];
+      if (!file) return;
+      const data = new FormData();
+      data.append("gif", file);
+      const res = await fetch("analyze", { method: "POST", body: data });
+      if (!res.ok) { errorEl.textContent = await errorText(res); return; }
+      const g = await res.json();
+      const loop = g.loop === null ? "plays once" : (g.loop === 0 ? "loops forever" : `loops ${g.loop}x`);
+      info.textContent = `${g.width}×${g.height}px · ${g.frame_count} frame(s) · ${(g.total_duration / 1000).toFixed(2)}s · ` +
+        `up to ${g.max_colors} colours/frame · ${g.has_transparency ? "transparent" : "opaque"} · ${loop}`;
+      info.classList.remove("hidden");
+    });
+
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorEl.textContent = "";
+      $("submit").disabled = true;
+      $("submit").textContent = "Processing…";
+      try {
+        const res = await fetch("overlay", { method: "POST", body: new FormData(e.target) });
+        if (!res.ok) { errorEl.textContent = await errorText(res); return; }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const name = ($("gif").files[0].name.replace(/\.[^.]*$/, "") || "image") + "-overlay.gif";
+        $("result").src = url;
+        $("download").href = url;
+        $("download").download = name;
+        $("result-fig").classList.remove("hidden");
+      } catch (err) {
+        errorEl.textContent = String(err);
+      } finally {
+        $("submit").disabled = false;
+        $("submit").textContent = "Create GIF";
+      }
+    });
+  </script>
+</body>
+</html>
