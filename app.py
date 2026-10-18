@@ -88,6 +88,10 @@ def overlay():
         opacity=_number("opacity", 100.0),
         margin=_number("margin", 0, int),
         stretch_overlay=request.form.get("stretch_overlay", "").lower() in ("true", "on", "1"),
+        crop_x=_number("crop_x", 0, int),
+        crop_y=_number("crop_y", 0, int),
+        crop_width=_number("crop_width", None, int),
+        crop_height=_number("crop_height", None, int),
     )
     result, info = overlay_gif(gif_data, overlay_data, opts, max_pixels=MAX_PIXELS)
 

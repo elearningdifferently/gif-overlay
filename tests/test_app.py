@@ -141,6 +141,47 @@ def test_stretch_checkbox_defaults_to_unchecked(client):
     assert "Stretch overlay to fit full GIF" in html
 
 
+def test_crop_controls_are_optional_pixel_inputs(client):
+    html = client.get("/").get_data(as_text=True)
+    inputs = EditorHTML(html).inputs
+    for field in ("crop_x", "crop_y", "crop_width", "crop_height"):
+        control = inputs[field]
+        assert control["name"] == field
+        assert control["type"] == "number"
+        assert control["step"] == "1"
+        assert "required" not in control
+        assert control["aria-describedby"] == "crop-help"
+        if field in ("crop_x", "crop_y"):
+            assert control["min"] == control["value"] == "0"
+        else:
+            assert control["min"] == "1"
+            assert "value" not in control
+    assert "Pixel-based crop of the base and overlay together" in html
+
+
+def test_crop_request_is_applied_to_download(client):
+    original = client.post("/overlay", data=upload_data())
+    response = client.post("/overlay", data=upload_data(
+        crop_x="25", crop_y="15", crop_width="999", crop_height="30",
+    ))
+    assert response.status_code == 200
+    assert response.mimetype == "image/gif"
+    output_frames = frames_of(response.data)
+    assert len(output_frames) == len(DURATIONS)
+    for full, output in zip(frames_of(original.data), output_frames):
+        assert output.size == (55, 30)
+        assert pixels(output) == pixels(full.crop((25, 15, 80, 45)))
+
+
+def test_blank_crop_request_keeps_output_unchanged(client):
+    original = client.post("/overlay", data=upload_data())
+    response = client.post("/overlay", data=upload_data(
+        **{field: "" for field in ("crop_x", "crop_y", "crop_width", "crop_height")}
+    ))
+    assert response.status_code == 200
+    assert response.data == original.data
+
+
 @pytest.mark.parametrize("flag", [None, "false", "true", "on", "1"])
 def test_overlay_stretch_request_option(client, flag):
     options = {} if flag is None else {"stretch_overlay": flag}
@@ -238,7 +279,10 @@ def test_rejects_non_gif_base_even_with_gif_extension(client, route):
     assert_user_error(client.post(route, data=data), "base image must be a GIF")
 
 
-@pytest.mark.parametrize("field", ["x", "y", "margin", "scale", "opacity"])
+@pytest.mark.parametrize("field", [
+    "x", "y", "margin", "scale", "opacity",
+    "crop_x", "crop_y", "crop_width", "crop_height",
+])
 @pytest.mark.parametrize("value", ["not-a-number", "NaN", "inf", "-inf", "1e999"])
 def test_rejects_invalid_numeric_options(client, field, value):
     response = client.post("/overlay", data=upload_data(**{field: value}))

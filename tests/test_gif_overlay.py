@@ -101,6 +101,66 @@ def test_play_once_gif_stays_play_once():
     assert "loop" not in Image.open(io.BytesIO(out)).info
 
 
+@pytest.mark.parametrize("transparent", [False, True])
+@pytest.mark.parametrize("stretch", [False, True])
+def test_crop_applies_after_compositing_and_preserves_timing(transparent, stretch):
+    gif = make_gif(transparent=transparent, loop=3)
+    overlay = make_png(color=(0, 255, 0, 128))
+    opts = OverlayOptions(stretch_overlay=stretch)
+    uncropped, _ = overlay_gif(gif, overlay, opts)
+    opts.crop_x, opts.crop_y = 15, 10
+    opts.crop_width, opts.crop_height = 40, 35
+    cropped, _ = overlay_gif(gif, overlay, opts)
+    result = Image.open(io.BytesIO(cropped))
+    assert result.size == (40, 35)
+    assert result.n_frames == len(DURATIONS)
+    assert result.info["loop"] == 3
+    assert [f.info["duration"] for f in ImageSequence.Iterator(result)] == DURATIONS
+    for full, output in zip(frames_of(uncropped), frames_of(cropped)):
+        expected = pixels(full.crop((15, 10, 55, 45)))
+        actual = pixels(output)
+        assert [p[3] for p in actual] == [p[3] for p in expected]
+        assert [p for p in actual if p[3]] == [p for p in expected if p[3]]
+
+
+@pytest.mark.parametrize("crop,box", [
+    ({}, (0, 0, 80, 60)),
+    ({"crop_x": 10}, (10, 0, 80, 60)),
+    ({"crop_width": 40}, (0, 0, 40, 60)),
+    ({"crop_height": 35}, (0, 0, 80, 35)),
+    ({"crop_x": -10, "crop_y": -20, "crop_width": 90, "crop_height": 70}, (0, 0, 80, 60)),
+    ({"crop_x": 60, "crop_y": 40, "crop_width": 9999, "crop_height": 9999}, (60, 40, 80, 60)),
+    ({"crop_x": 80, "crop_width": 10}, (0, 0, 80, 60)),
+    ({"crop_y": 1000, "crop_height": 10}, (0, 0, 80, 60)),
+    ({"crop_width": 0}, (0, 0, 80, 60)),
+    ({"crop_height": -5}, (0, 0, 80, 60)),
+])
+def test_crop_clamping_and_no_crop_fallback(crop, box):
+    gif, overlay = make_gif(), make_png()
+    original, _ = overlay_gif(gif, overlay)
+    output, _ = overlay_gif(gif, overlay, OverlayOptions(**crop))
+    if box == (0, 0, 80, 60):
+        assert output == original
+    for full, cropped in zip(frames_of(original), frames_of(output)):
+        assert cropped.size == (box[2] - box[0], box[3] - box[1])
+        assert pixels(cropped) == pixels(full.crop(box))
+
+
+@pytest.mark.parametrize("x,width", [(10, 60), (30, 50), (0, 5)])
+def test_crop_keeps_original_pixels_exact_outside_gradient_overlay(x, width):
+    gif = make_gif()
+    out, _ = overlay_gif(
+        gif, make_gradient_png((40, 40)),
+        OverlayOptions(crop_x=x, crop_width=width, crop_y=5, crop_height=50),
+    )
+    for source, output in zip(frames_of(gif), frames_of(out)):
+        for ox in range(width):
+            for oy in range(50):
+                sx, sy = ox + x, oy + 5
+                if not (20 <= sx < 60 and 10 <= sy < 50):
+                    assert output.getpixel((ox, oy)) == source.getpixel((sx, sy))
+
+
 def test_many_color_overlay_keeps_original_pixels_exact():
     gif = make_gif()
     out, _ = overlay_gif(gif, make_gradient_png(), OverlayOptions(position="center"))

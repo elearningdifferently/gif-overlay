@@ -15,7 +15,8 @@
   let exportController = null;
   let resultUrl = null;
   let busy = false;
-  const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay"];
+  const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay",
+    "crop_x", "crop_y", "crop_width", "crop_height"];
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   $("hide-previews").defaultChecked = reducedMotion.matches;
   function updateMotion() {
@@ -66,7 +67,7 @@
     } else if (!info) {
       $("status").textContent = "A valid base GIF analysis is required before export.";
     } else {
-      $("status").textContent = settingsValid() ? "Your layers are ready. Create your GIF when it looks right." : "Check the placement values before exporting.";
+      $("status").textContent = settingsValid() ? "Your layers are ready. Create your GIF when it looks right." : "Check the placement and crop values before exporting.";
     }
     $("custom-controls").hidden = $("position").value !== "custom";
     renderPreview();
@@ -94,10 +95,24 @@
       return;
     }
     const { width: bw, height: bh } = base;
-    $("stage").style.aspectRatio = `${bw} / ${bh}`;
+    let cx = Math.max(0, Math.min(Number($("crop_x").value), bw));
+    let cy = Math.max(0, Math.min(Number($("crop_y").value), bh));
+    let cw = $("crop_width").value === "" ? bw - cx : Math.min(Number($("crop_width").value), bw - cx);
+    let ch = $("crop_height").value === "" ? bh - cy : Math.min(Number($("crop_height").value), bh - cy);
+    if (!settingsValid() || cw <= 0 || ch <= 0) {
+      cx = cy = 0;
+      cw = bw;
+      ch = bh;
+    }
+    $("stage").style.aspectRatio = `${cw} / ${ch}`;
     // Keep tall images inside the workspace while retaining source aspect ratio.
-    $("stage").style.width = `min(100%, ${440 * bw / bh}px)`;
-    $("preview-detail").textContent = `${bw} × ${bh} px canvas${overlay ? "" : " · Add an overlay to compose."}`;
+    $("stage").style.width = `min(100%, ${440 * cw / ch}px)`;
+    Object.assign($("base-preview").style, {
+      width: `${bw / cw * 100}%`, height: `${bh / ch * 100}%`,
+      left: `${-cx / cw * 100}%`, top: `${-cy / ch * 100}%`,
+    });
+    const detail = `${cw} × ${ch} px output · ${bw} × ${bh} px canvas · Crop origin (${cx}, ${cy})`;
+    $("preview-detail").textContent = `${detail}${overlay ? "" : " · Add an overlay to compose."}`;
     if (!overlay || !settingsValid()) return;
     const scale = Number($("scale").value);
     const stretch = $("stretch_overlay").checked;
@@ -120,11 +135,11 @@
       if (position.includes("bottom")) y = bh - oh - margin;
     }
     Object.assign($("overlay-preview").style, {
-      width: `${ow / bw * 100}%`, height: `${oh / bh * 100}%`,
-      left: `${x / bw * 100}%`, top: `${y / bh * 100}%`,
+      width: `${ow / cw * 100}%`, height: `${oh / ch * 100}%`,
+      left: `${(x - cx) / cw * 100}%`, top: `${(y - cy) / ch * 100}%`,
       opacity: String(Number($("opacity").value || "100") / 100),
     });
-    $("preview-detail").textContent = `${bw} × ${bh} px canvas · Overlay ${ow} × ${oh} px at (${x}, ${y})`;
+    $("preview-detail").textContent = `${detail} · Overlay ${ow} × ${oh} px at (${x}, ${y})`;
   }
 
   async function apiError(response) {
