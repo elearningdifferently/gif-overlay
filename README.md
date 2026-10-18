@@ -15,6 +15,9 @@ animated GIF, with palette-aware quality preservation.
   This may distort the overlay and overrides width, position and margin;
   transparency and opacity still apply. Unchecked keeps the existing sizing.
 - Animated overlays (e.g. another GIF) are synchronised with the base GIF's timing.
+- Crop the final composition (base + overlay) using pixel X, Y, width and height
+  in Composition preview. Blank dimensions keep the remaining canvas; bounds
+  are clamped, and empty/out-of-bounds crops fall back to the full frame.
 - Download the result as `<name>-overlay.gif`.
 - Preview placement before rendering, compare the generated result, and reset
   the editor to start again. Processing states and inline errors guide uploads
@@ -22,7 +25,7 @@ animated GIF, with palette-aware quality preservation.
 
 ## Quality preservation
 
-The exporter preserves canvas size, frame count, per-frame durations and loop
+The exporter preserves canvas size (unless cropped), frame count, per-frame durations and loop
 metadata. GIF supports at most 256 colours per frame and only binary
 transparency, so **not every overlay can be exported losslessly**. Partial
 alpha must become either transparent or opaque. Each frame gets its own palette:
@@ -134,7 +137,10 @@ image-processing memory safeguard.
   (`top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`,
   `bottom`, `bottom-right`, `custom`), `x`, `y`, `margin`, `scale`, `opacity`,
   `stretch_overlay` (`true` to stretch to the full canvas; omitted/`false` by default);
-  returns the resulting `image/gif`.
+  optional `crop_x`, `crop_y` (default `0`), `crop_width`, `crop_height` (blank or
+  omitted means the remaining canvas). Crop is applied after compositing on
+  every frame, matching the live preview; empty rectangles keep the full frame.
+  Returns the resulting `image/gif` used for both generated preview and download.
 
 ## Manual browser checklist
 

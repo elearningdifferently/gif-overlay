@@ -3,7 +3,7 @@
 Quality strategy
 ----------------
 GIF frames are limited to a 256 colour palette. To avoid losing quality the
-output keeps the original canvas size, frame count, per-frame durations, loop
+output keeps the original canvas size (unless cropped), frame count, per-frame durations, loop
 count and transparency, and each frame is written with its own local palette:
 
 1. If the composited frame fits in a palette (<= 256 colours, including a
@@ -80,6 +80,10 @@ class OverlayOptions:
     opacity: float = 100.0  # 0 - 100
     margin: int = 0
     stretch_overlay: bool = False
+    crop_x: int = 0
+    crop_y: int = 0
+    crop_width: int | None = None
+    crop_height: int | None = None
 
     def validate(self) -> None:
         if self.position not in POSITIONS:
@@ -218,6 +222,20 @@ def _palette_image(colors: list[tuple[int, int, int]]) -> Image.Image:
     return pal
 
 
+def _composition_crop(
+    size: tuple[int, int], opts: OverlayOptions
+) -> tuple[int, int, int, int]:
+    """Clamp the crop to the canvas; empty rectangles keep the full frame."""
+    width, height = size
+    x = max(0, min(opts.crop_x, width))
+    y = max(0, min(opts.crop_y, height))
+    right = width if opts.crop_width is None else min(width, x + opts.crop_width)
+    bottom = height if opts.crop_height is None else min(height, y + opts.crop_height)
+    if right <= x or bottom <= y:
+        return 0, 0, width, height
+    return x, y, right, bottom
+
+
 def _keys_to_colors(keys: np.ndarray) -> list[tuple[int, int, int]]:
     return [(int(k) >> 16 & 255, int(k) >> 8 & 255, int(k) & 255) for k in keys]
 
@@ -333,6 +351,7 @@ def overlay_gif(
     info = analyze_gif(gif_data, max_pixels=max_pixels)
     base = _open_image(gif_data, "GIF")
     base_size = base.size
+    crop_box = _composition_crop(base_size, opts)
 
     ov_frames, ov_durations = _load_overlay_frames(overlay_data, max_pixels)
     if max_pixels is not None and (opts.stretch_overlay or opts.scale > 0):
@@ -378,6 +397,17 @@ def overlay_gif(
                 dest=overlay_box[:2],
                 source=(overlay_box[0] - x, overlay_box[1] - y),
             )
+        if crop_box != (0, 0, *base_size):
+            canvas = canvas.crop(crop_box)
+            if overlay_box is not None:
+                left, top, right, bottom = crop_box
+                box = (
+                    max(0, overlay_box[0] - left),
+                    max(0, overlay_box[1] - top),
+                    min(right, overlay_box[2]) - left,
+                    min(bottom, overlay_box[3]) - top,
+                )
+                overlay_box = box if box[0] < box[2] and box[1] < box[3] else None
         out_frames.append(_to_paletted(canvas, overlay_box))
 
     save_kwargs: dict = {

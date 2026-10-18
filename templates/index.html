@@ -79,6 +79,16 @@
             </div>
           </div>
           <p id="preview-detail" class="hint">Your original GIF dimensions and frame timing are preserved on export.</p>
+          <div class="controls">
+            <h3>Crop final composition</h3>
+            <p id="crop-help" class="hint">Pixel-based crop of the base and overlay together, in preview and export. Blank width/height keeps the remaining canvas. Bounds are clamped; an empty crop keeps the full frame.</p>
+            <div class="two-columns">
+              <div><label for="crop_x">Crop X (px)</label><input id="crop_x" name="crop_x" type="number" min="0" step="1" value="0" aria-describedby="crop-help"></div>
+              <div><label for="crop_y">Crop Y (px)</label><input id="crop_y" name="crop_y" type="number" min="0" step="1" value="0" aria-describedby="crop-help"></div>
+              <div><label for="crop_width">Crop width (px)</label><input id="crop_width" name="crop_width" type="number" min="1" step="1" placeholder="Remaining width" aria-describedby="crop-help"></div>
+              <div><label for="crop_height">Crop height (px)</label><input id="crop_height" name="crop_height" type="number" min="1" step="1" placeholder="Remaining height" aria-describedby="crop-help"></div>
+            </div>
+          </div>
           <p class="preview-note">Browser preview is approximate: animated layers run independently, and GIF palette / transparency may differ. The generated GIF below is authoritative.</p>
           <label class="motion-control"><input id="hide-previews" type="checkbox"> Hide image previews (reduce motion)</label>
           <p id="motion-note" class="hint" hidden>Image previews are hidden. You can still edit, export and download.</p>
