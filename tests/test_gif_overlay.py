@@ -134,14 +134,78 @@ def test_scale_opacity_and_custom_position():
     assert frame.getpixel((4 + 21, 6 + 21)) == src.getpixel((25, 27))
 
 
-def test_animated_overlay_follows_time():
+@pytest.mark.parametrize("opacity", [100, 50])
+def test_stretch_fills_canvas_and_keeps_alpha_blending(opacity):
+    gif = make_gif()
+    opts = OverlayOptions(
+        stretch_overlay=True, position="custom", x=500, y=-20,
+        margin=10, scale=1000, opacity=opacity,
+    )
+    out, _ = overlay_gif(
+        gif, make_png((3, 7), (0, 255, 0, 128)), opts, max_pixels=25_000
+    )
+    result = Image.open(io.BytesIO(out))
+    assert result.size == (80, 60)
+    assert result.n_frames == len(DURATIONS)
+    assert result.info["loop"] == 0
+    assert [f.info["duration"] for f in ImageSequence.Iterator(result)] == DURATIONS
+    overlay = Image.new("RGBA", (80, 60), (0, 255, 0, round(128 * opacity / 100)))
+    for source, output in zip(frames_of(gif), frames_of(out)):
+        source.alpha_composite(overlay)
+        assert pixels(output) == pixels(source)
+
+
+@pytest.mark.parametrize("format", ["PNG", "GIF"])
+@pytest.mark.parametrize("transparent_base", [False, True])
+def test_stretched_overlay_preserves_transparent_regions(format, transparent_base):
+    overlay = Image.new("RGBA", (20, 10), (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).rectangle((10, 0, 19, 9), fill=(0, 255, 0, 255))
+    buf = io.BytesIO()
+    overlay.save(buf, format=format)
+    gif = make_gif(transparent=transparent_base)
+    out, _ = overlay_gif(gif, buf.getvalue(), OverlayOptions(stretch_overlay=True))
+    output_frames = frames_of(out)
+    assert len(output_frames) == len(DURATIONS)
+    for source, output in zip(frames_of(gif), output_frames):
+        for y in range(60):
+            original = source.getpixel((0, y))
+            actual = output.getpixel((0, y))
+            assert actual[3] == original[3]
+            if original[3]:
+                assert actual == original
+            assert output.getpixel((79, y)) == (0, 255, 0, 255)
+
+
+def test_stretched_animated_overlay_respects_pixel_limit():
+    frames = [Image.new("RGB", (10, 10), (i * 30, 0, 0)) for i in range(6)]
+    buf = io.BytesIO()
+    frames[0].save(
+        buf, format="GIF", save_all=True, append_images=frames[1:], duration=50
+    )
+    with pytest.raises(GifOverlayError, match="scaled overlay image is too large"):
+        overlay_gif(
+            make_gif(), buf.getvalue(), OverlayOptions(stretch_overlay=True),
+            max_pixels=25_000,
+        )
+
+
+@pytest.mark.parametrize("stretch", [False, True])
+def test_animated_overlay_follows_time(stretch):
     frames = [Image.new("RGBA", (10, 10), c) for c in [(255, 0, 0, 255), (0, 0, 255, 255)]]
+    if stretch:
+        for frame in frames:
+            frame.putpixel((5, 5), (0, 0, 0, 0))
     buf = io.BytesIO()
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=110, loop=0)
-    out, _ = overlay_gif(make_gif(), buf.getvalue(), OverlayOptions(position="top-left"))
+    out, _ = overlay_gif(
+        make_gif(), buf.getvalue(),
+        OverlayOptions(position="top-left", stretch_overlay=stretch),
+    )
     # Base frames start at 0, 50, 110, 180, 260ms; overlay switches every 110ms.
     colors = [f.getpixel((0, 0))[:3] for f in frames_of(out)]
     assert colors == [(255, 0, 0), (255, 0, 0), (0, 0, 255), (0, 0, 255), (255, 0, 0)]
+    if stretch:
+        assert [f.getpixel((79, 59))[:3] for f in frames_of(out)] == colors
 
 
 def test_invalid_options():

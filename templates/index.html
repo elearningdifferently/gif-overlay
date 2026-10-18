@@ -45,6 +45,8 @@
         </section>
         <section class="panel controls">
           <h2><span class="step">02</span> Make it fit</h2>
+          <label for="stretch_overlay"><input id="stretch_overlay" name="stretch_overlay" type="checkbox" value="true" aria-describedby="stretch-help"> Stretch overlay to fit full GIF</label>
+          <p id="stretch-help" class="hint">Fills every frame’s full canvas, ignoring width, position and margin. May distort the image; transparency and opacity still apply.</p>
           <label for="position">Position</label>
           <select id="position" name="position">
             {% for p in positions %}<option value="{{ p }}" {% if p == 'center' %}selected{% endif %}>{{ p | replace('-', ' ') | title }}</option>{% endfor %}
