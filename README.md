@@ -47,7 +47,7 @@ local preview as a pixel-exact export.
 pip install -r requirements-dev.txt
 python app.py               # http://localhost:8080
 # or, like in production:
-gunicorn --bind 0.0.0.0:8080 app:app
+gunicorn --workers 1 --bind 0.0.0.0:8080 app:app
 ```
 
 Run the tests:
@@ -67,6 +67,42 @@ started via the `Procfile` (gunicorn).
   in the spec if you deploy from a fork).
 
 Health check endpoint: `/health`.
+
+### Anonymous, ephemeral background jobs
+
+The editor uploads to `POST /jobs`, receives a UUID immediately (HTTP 202),
+polls `GET /jobs/<job_id>`, then downloads `GET /jobs/<job_id>/result`.
+One background rendering thread consumes a FIFO queue inside the existing web
+service. Rendering uses the same implementation as the synchronous `/overlay`
+endpoint, which remains available for compatibility. No database, SQL, Redis,
+account, session, or separate App Platform Worker component is used.
+
+**Keep `--workers 1` in the Procfile and exactly one App Platform instance.**
+Each process/instance has its own memory and temporary files; multiple workers
+or instances cannot reliably serve each other's jobs. Do not override the run
+command with a multi-worker configuration or enable horizontal autoscaling.
+The 120-second Gunicorn timeout remains a web-request safeguard, not a rendering
+deadline: rendering no longer holds an HTTP request open. Uploads, analysis,
+and result transfers still have hosting limits. Background work does not
+increase rendering speed or eliminate CPU/memory limits.
+
+Uploads are saved in private temporary directories, then deleted as soon as
+rendering succeeds or fails. Completed results and failed-job metadata expire
+**15 minutes after processing finishes**; cleanup runs every 30 seconds and
+on job requests, with best-effort shutdown cleanup. There is a limit of **16
+retained jobs**, including queued, processing and recently finished jobs; new
+submissions receive HTTP 503 when full. The existing upload and pixel limits
+still apply. Numeric/settings validation happens on submission; image decoding
+and pixel-budget validation happen in the background and can yield an error job.
+
+**No persistence or completion guarantee:** jobs and downloads may disappear on
+restart, redeploy, crash, or instance replacement. Hard kills cannot guarantee
+immediate file cleanup; temporary container storage is ephemeral. Keep your
+source files and resubmit if a job disappears. Changing files/settings stops
+browser polling and ignores stale results, but does not cancel server rendering;
+abandoned jobs still finish and expire. Job UUIDs are anonymous bearer links:
+anyone with a UUID can retrieve its status/result until expiry; do not share it.
+No upload paths are exposed in status responses.
 
 ### Troubleshooting an App Platform hostname that does not resolve
 
@@ -123,7 +159,7 @@ public hostname exists or is routed correctly. Preserve the existing
 | `MAX_PIXELS`    | `950000000` | Max `width × height × frames` of a GIF (memory cap). |
 | `PORT`          | `8080`      | Port to listen on (set by App Platform).             |
 
-The upload cap is **not per file**: `/overlay` must fit the GIF, overlay,
+The upload cap is **not per file**: `/jobs` (and legacy `/overlay`) must fit the GIF, overlay,
 options and multipart headers/boundaries into the same request budget.
 Two individually acceptable files can exceed it together, and files whose
 combined bytes equal the cap leave no room for multipart overhead. Over-limit
@@ -133,6 +169,14 @@ image-processing memory safeguard.
 ## API
 
 - `POST /analyze` — form field `gif`; returns GIF properties as JSON.
+- `POST /jobs` — the same form fields as `/overlay`; returns HTTP 202 with
+  `job_id`, initial `state: "queued"`, timestamps, progress text, `error`,
+  and `result_available`.
+- `GET /jobs/<job_id>` — status (`queued`, `processing`, `done`, or `error`).
+  Unknown/expired jobs return HTTP 404 with JSON `error`; expired metadata is
+  removed rather than retained as a tombstone.
+- `GET /jobs/<job_id>/result` — GIF attachment when done, HTTP 409 JSON status
+  when pending/failed, or HTTP 404 when unknown/expired.
 - `POST /overlay` — form fields `gif`, `overlay`, and optional `position`
   (`top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`,
   `bottom`, `bottom-right`, `custom`), `x`, `y`, `margin`, `scale`, `opacity`,
