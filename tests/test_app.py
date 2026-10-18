@@ -22,6 +22,7 @@ class EditorHTML(HTMLParser):
         self.config_chunks = []
         self.in_config = False
         self.config_count = 0
+        self.inputs = {}
         self.feed(html)
 
     def handle_starttag(self, tag, attrs):
@@ -35,6 +36,8 @@ class EditorHTML(HTMLParser):
                 assert attrs.get("type") == "application/json"
         elif tag == "link" and attrs.get("rel") == "stylesheet":
             self.stylesheets.append(attrs.get("href"))
+        elif tag == "input":
+            self.inputs[attrs.get("id")] = attrs
 
     def handle_endtag(self, tag):
         if tag == "script":
@@ -126,6 +129,34 @@ def test_editor_config_cannot_break_out_of_json_script(client, monkeypatch):
     html = response.get_data(as_text=True)
     assert injected not in html
     assert EditorHTML(html).config["maxUploadMb"] == injected
+
+
+def test_stretch_checkbox_defaults_to_unchecked(client):
+    html = client.get("/").get_data(as_text=True)
+    checkbox = EditorHTML(html).inputs["stretch_overlay"]
+    assert checkbox["type"] == "checkbox"
+    assert checkbox["name"] == "stretch_overlay"
+    assert checkbox["value"] == "true"
+    assert "checked" not in checkbox
+    assert "Stretch overlay to fit full GIF" in html
+
+
+@pytest.mark.parametrize("flag", [None, "false", "true", "on", "1"])
+def test_overlay_stretch_request_option(client, flag):
+    options = {} if flag is None else {"stretch_overlay": flag}
+    data = upload_data(**options)
+    data["overlay"] = (io.BytesIO(make_png(color=(0, 255, 0, 128))), "logo.png")
+    response = client.post("/overlay", data=data)
+    assert response.status_code == 200
+    stretched = flag in ("true", "on", "1")
+    size = (80, 60) if stretched else (20, 20)
+    position = (0, 0) if stretched else (30, 20)
+    green = Image.new("RGBA", size, (0, 255, 0, 128))
+    output_frames = frames_of(response.data)
+    assert len(output_frames) == len(DURATIONS)
+    for source, output in zip(frames_of(make_gif()), output_frames):
+        source.alpha_composite(green, position)
+        assert pixels(output) == pixels(source)
 
 
 def test_health_is_json(client):

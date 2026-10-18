@@ -11,6 +11,9 @@ animated GIF, with palette-aware quality preservation.
   transparency, loop count).
 - Place the overlay at any corner/edge/centre or custom X/Y, with margin,
   scaling (width as % of the GIF) and opacity.
+- Opt in to **Stretch overlay to fit full GIF** to fill every frame's canvas.
+  This may distort the overlay and overrides width, position and margin;
+  transparency and opacity still apply. Unchecked keeps the existing sizing.
 - Animated overlays (e.g. another GIF) are synchronised with the base GIF's timing.
 - Download the result as `<name>-overlay.gif`.
 - Preview placement before rendering, compare the generated result, and reset
@@ -129,7 +132,8 @@ image-processing memory safeguard.
 - `POST /analyze` — form field `gif`; returns GIF properties as JSON.
 - `POST /overlay` — form fields `gif`, `overlay`, and optional `position`
   (`top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`,
-  `bottom`, `bottom-right`, `custom`), `x`, `y`, `margin`, `scale`, `opacity`;
+  `bottom`, `bottom-right`, `custom`), `x`, `y`, `margin`, `scale`, `opacity`,
+  `stretch_overlay` (`true` to stretch to the full canvas; omitted/`false` by default);
   returns the resulting `image/gif`.
 
 ## Manual browser checklist

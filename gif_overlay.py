@@ -79,6 +79,7 @@ class OverlayOptions:
     scale: float = 0.0  # overlay width as % of GIF width; 0 = keep original size
     opacity: float = 100.0  # 0 - 100
     margin: int = 0
+    stretch_overlay: bool = False
 
     def validate(self) -> None:
         if self.position not in POSITIONS:
@@ -170,7 +171,10 @@ def _load_overlay_frames(
 def _prepare_overlay(
     overlay: Image.Image, base_size: tuple[int, int], opts: OverlayOptions
 ) -> Image.Image:
-    if opts.scale > 0:
+    if opts.stretch_overlay:
+        if overlay.size != base_size:
+            overlay = overlay.resize(base_size, Image.Resampling.LANCZOS)
+    elif opts.scale > 0:
         new_w = max(1, round(base_size[0] * opts.scale / 100))
         new_h = max(1, round(overlay.height * new_w / overlay.width))
         if (new_w, new_h) != overlay.size:
@@ -187,6 +191,8 @@ def _prepare_overlay(
 def _overlay_position(
     base_size: tuple[int, int], ov_size: tuple[int, int], opts: OverlayOptions
 ) -> tuple[int, int]:
+    if opts.stretch_overlay:
+        return 0, 0
     bw, bh = base_size
     ow, oh = ov_size
     m = opts.margin
@@ -329,9 +335,12 @@ def overlay_gif(
     base_size = base.size
 
     ov_frames, ov_durations = _load_overlay_frames(overlay_data, max_pixels)
-    if max_pixels is not None and opts.scale > 0:
-        scaled_w = base_size[0] * opts.scale / 100
-        scaled_h = ov_frames[0].height * scaled_w / ov_frames[0].width
+    if max_pixels is not None and (opts.stretch_overlay or opts.scale > 0):
+        if opts.stretch_overlay:
+            scaled_w, scaled_h = base_size
+        else:
+            scaled_w = base_size[0] * opts.scale / 100
+            scaled_h = ov_frames[0].height * scaled_w / ov_frames[0].width
         if scaled_w * scaled_h * len(ov_frames) > max_pixels:
             raise GifOverlayError("The scaled overlay image is too large.")
     ov_frames = [_prepare_overlay(f, base_size, opts) for f in ov_frames]

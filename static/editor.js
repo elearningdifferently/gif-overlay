@@ -15,7 +15,7 @@
   let exportController = null;
   let resultUrl = null;
   let busy = false;
-  const settings = ["position", "x", "y", "margin", "scale", "opacity"];
+  const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay"];
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   $("hide-previews").defaultChecked = reducedMotion.matches;
   function updateMotion() {
@@ -100,13 +100,17 @@
     $("preview-detail").textContent = `${bw} × ${bh} px canvas${overlay ? "" : " · Add an overlay to compose."}`;
     if (!overlay || !settingsValid()) return;
     const scale = Number($("scale").value);
-    const ow = scale > 0 ? Math.max(1, roundEven(bw * scale / 100)) : overlay.width;
-    const oh = scale > 0 ? Math.max(1, roundEven(overlay.height * ow / overlay.width)) : overlay.height;
+    const stretch = $("stretch_overlay").checked;
+    const ow = stretch ? bw : scale > 0 ? Math.max(1, roundEven(bw * scale / 100)) : overlay.width;
+    const oh = stretch ? bh : scale > 0 ? Math.max(1, roundEven(overlay.height * ow / overlay.width)) : overlay.height;
     const margin = Math.trunc(Number($("margin").value));
     const position = $("position").value;
     let x = Math.floor((bw - ow) / 2);
     let y = Math.floor((bh - oh) / 2);
-    if (position === "custom") {
+    if (stretch) {
+      x = 0;
+      y = 0;
+    } else if (position === "custom") {
       x = Math.trunc(Number($("x").value));
       y = Math.trunc(Number($("y").value));
     } else {
@@ -303,7 +307,9 @@
     const data = new FormData();
     data.append("gif", layers.gif.file);
     data.append("overlay", layers.overlay.file);
-    for (const name of settings) data.append(name, $(name).value);
+    for (const name of settings) {
+      data.append(name, $(name).type === "checkbox" ? $(name).checked : $(name).value);
+    }
     busy = true;
     const currentRevision = revision;
     const controller = new AbortController();
