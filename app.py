@@ -18,9 +18,9 @@ from gif_overlay import (
     overlay_gif,
 )
 
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "100"))
 # Upper bound on width * height * frames to protect the server's memory.
-MAX_PIXELS = int(os.environ.get("MAX_PIXELS", str(100_000_000)))
+MAX_PIXELS = int(os.environ.get("MAX_PIXELS", str(950_000_000)))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024

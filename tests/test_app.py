@@ -2,6 +2,7 @@
 
 import io
 import json
+import runpy
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
@@ -67,6 +68,34 @@ def assert_user_error(response, message, status=400):
     assert response.status_code == status
     assert response.mimetype == "application/json"
     assert message.lower() in response.get_json()["error"].lower()
+
+
+@pytest.mark.parametrize("upload_mb,pixels", [(None, None), ("7", "12345")])
+def test_configured_limits(monkeypatch, upload_mb, pixels):
+    for name, value in (("MAX_UPLOAD_MB", upload_mb), ("MAX_PIXELS", pixels)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    configured = runpy.run_path(app_module.__file__)
+    expected_upload_mb = 100 if upload_mb is None else int(upload_mb)
+    expected_pixels = 950_000_000 if pixels is None else int(pixels)
+    assert configured["MAX_UPLOAD_MB"] == expected_upload_mb
+    assert configured["MAX_PIXELS"] == expected_pixels
+    assert configured["app"].config["MAX_CONTENT_LENGTH"] == expected_upload_mb * 1024 * 1024
+
+
+@pytest.mark.parametrize("route", ["/analyze", "/overlay"])
+def test_default_upload_limit_error(monkeypatch, route):
+    monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
+    configured = runpy.run_path(app_module.__file__)
+    response = configured["app"].test_client().post(
+        route, data=b"x",
+        environ_overrides={"CONTENT_LENGTH": str(100 * 1024 * 1024 + 1)},
+        content_type="multipart/form-data; boundary=test",
+    )
+    assert response.status_code == 413
+    assert response.get_json() == {"error": "Upload too large (limit 100 MB)."}
 
 
 def test_editor_config_and_static_assets(client):

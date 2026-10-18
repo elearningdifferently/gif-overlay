@@ -16,6 +16,6 @@ services:
       http_path: /health
     envs:
       - key: MAX_UPLOAD_MB
-        value: "50"
+        value: "100"
       - key: MAX_PIXELS
-        value: "100000000"
+        value: "950000000"

@@ -113,8 +113,8 @@ public hostname exists or is routed correctly. Preserve the existing
 
 | Variable        | Default     | Description                                          |
 |-----------------|-------------|------------------------------------------------------|
-| `MAX_UPLOAD_MB` | `50`        | Per-request combined upload cap in MiB, including multipart overhead and form fields. |
-| `MAX_PIXELS`    | `100000000` | Max `width × height × frames` of a GIF (memory cap). |
+| `MAX_UPLOAD_MB` | `100`       | Per-request combined upload cap in MiB, including multipart overhead and form fields. |
+| `MAX_PIXELS`    | `950000000` | Max `width × height × frames` of a GIF (memory cap). |
 | `PORT`          | `8080`      | Port to listen on (set by App Platform).             |
 
 The upload cap is **not per file**: `/overlay` must fit the GIF, overlay,
