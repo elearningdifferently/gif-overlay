@@ -110,6 +110,7 @@ def test_editor_config_and_static_assets(client):
         "maxUploadMb": app_module.MAX_UPLOAD_MB,
         "analyzeUrl": "/analyze",
         "overlayUrl": "/overlay",
+        "jobsUrl": "/jobs",
     }
     script_urls = [url for url in page.scripts if urlsplit(url).path.endswith("/editor.js")]
     style_urls = [url for url in page.stylesheets if urlsplit(url).path.endswith("/editor.css")]

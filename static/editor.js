@@ -15,6 +15,7 @@
   let exportController = null;
   let resultUrl = null;
   let busy = false;
+  let exportProgress = "";
   const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay",
     "crop_x", "crop_y", "crop_width", "crop_height"];
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -42,6 +43,9 @@
   function compositionChanged() {
     revision += 1;
     exportController?.abort();
+    exportController = null;
+    busy = false;
+    exportProgress = "";
     clearResult();
     $("error").textContent = "";
     update();
@@ -59,7 +63,7 @@
     if (total >= limit) {
       $("status").textContent = "Files exceed the request budget. Choose smaller files; form data also needs space.";
     } else if (busy) {
-      $("status").textContent = "Processing on the server. This may take a moment.";
+      $("status").textContent = exportProgress;
     } else if (resultUrl) {
       $("status").textContent = "Export complete. Preview and download your GIF below.";
     } else if (!layers.gif.file || !layers.overlay.file) {
@@ -142,7 +146,7 @@
     $("preview-detail").textContent = `${detail} · Overlay ${ow} × ${oh} px at (${x}, ${y})`;
   }
 
-  async function apiError(response) {
+  async function apiError(response, jobRequest = false) {
     let message = "";
     try {
       const body = await response.json();
@@ -151,7 +155,35 @@
     if (response.status === 413) {
       return `Request too large. Both files and form data must fit within ${config.maxUploadMb} MB; the host may impose a smaller limit.`;
     }
+    if (jobRequest && response.status === 404) {
+      return `${message || "This export is no longer available."} The job may have expired or the server restarted. Click Create GIF to retry.`;
+    }
     return message || `The server could not complete the request (HTTP ${response.status}). Please try again.`;
+  }
+
+  function pollDelay(signal) {
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        reject(new DOMException("Export interrupted.", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, 1000);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  }
+
+  async function readJob(response) {
+    if (!response.ok) throw new Error(await apiError(response, true));
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("The server returned unreadable job information. Click Create GIF to retry.");
+    }
   }
 
   async function analyze(file) {
@@ -326,28 +358,64 @@
       data.append(name, $(name).type === "checkbox" ? $(name).checked : $(name).value);
     }
     busy = true;
+    exportProgress = "Uploading files to queue your GIF…";
     const currentRevision = revision;
     const controller = new AbortController();
     exportController = controller;
+    const stale = () => controller.signal.aborted || currentRevision !== revision || exportController !== controller;
     const fallbackName = (layers.gif.file.name.replace(/\.[^.]*$/, "") || "image") + "-overlay.gif";
     clearResult();
     $("error").textContent = "";
     update();
     try {
       // Measure the serialized multipart body, including headers, names and boundaries.
-      const request = new Request(config.overlayUrl, { method: "POST", body: data });
+      const request = new Request(config.jobsUrl, { method: "POST", body: data });
       const body = await request.blob();
-      if (controller.signal.aborted || currentRevision !== revision) return;
+      if (stale()) return;
       if (body.size > limit) {
         throw new Error(`The complete request exceeds ${config.maxUploadMb} MB including form data. Choose smaller files.`);
       }
-      const response = await fetch(config.overlayUrl, { method: "POST", body, headers: { "Content-Type": request.headers.get("Content-Type") }, signal: controller.signal });
-      if (!response.ok) throw new Error(await apiError(response));
+      const created = await fetch(config.jobsUrl, { method: "POST", body, headers: { "Content-Type": request.headers.get("Content-Type") }, signal: controller.signal });
+      const job = await readJob(created);
+      if (stale()) return;
+      if (created.status !== 202 || !job || typeof job.job_id !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.job_id)
+          || job.state !== "queued") {
+        throw new Error("The server returned invalid job information. Click Create GIF to retry.");
+      }
+      const jobUrl = `${config.jobsUrl.replace(/\/$/, "")}/${encodeURIComponent(job.job_id)}`;
+      exportProgress = "Queued. Waiting for the server to create your GIF…";
+      update();
+      while (true) {
+        await pollDelay(controller.signal);
+        if (stale()) return;
+        const status = await readJob(await fetch(jobUrl, { signal: controller.signal }));
+        if (stale()) return;
+        if (!status || status.job_id !== job.job_id
+            || !["queued", "processing", "done", "error", "failed"].includes(status.state)) {
+          throw new Error("The server returned invalid job information. Click Create GIF to retry.");
+        }
+        if (status.state === "error" || status.state === "failed") {
+          throw new Error(typeof status.error === "string" && status.error
+            ? status.error : "The server could not create your GIF. Click Create GIF to retry.");
+        }
+        if (status.state === "done") {
+          if (!status.result_available) {
+            throw new Error("The completed GIF is no longer available. It may have expired or the server restarted. Click Create GIF to retry.");
+          }
+          break;
+        }
+        const progress = typeof status.progress === "string" && status.progress ? ` ${status.progress}` : "";
+        exportProgress = `${status.state === "queued" ? "Queued." : "Processing on the server."}${progress}`;
+        update();
+      }
+      const response = await fetch(`${jobUrl}/result`, { signal: controller.signal });
+      if (!response.ok) throw new Error(await apiError(response, true));
       if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("image/gif")) {
         throw new Error("The server did not return a GIF. Please try again.");
       }
       const blob = await response.blob();
-      if (controller.signal.aborted || currentRevision !== revision) return;
+      if (stale()) return;
       if (!blob.size) throw new Error("The server returned an empty GIF. Please try again.");
       const disposition = response.headers.get("Content-Disposition") || "";
       const filename = disposition.match(/filename="([^"]+)"/)?.[1]
@@ -359,7 +427,7 @@
       $("download-name").textContent = filename;
       $("result-fig").hidden = false;
     } catch (error) {
-      if (controller.signal.aborted || currentRevision !== revision) return;
+      if (stale()) return;
       $("error").textContent = error instanceof TypeError
         ? "Could not reach the server. Check your connection and try again."
         : error.message;
@@ -367,6 +435,7 @@
       if (exportController === controller) {
         exportController = null;
         busy = false;
+        exportProgress = "";
         update();
       }
     }

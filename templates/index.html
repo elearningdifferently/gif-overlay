@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f6f7fb">
   <title>GIF Overlay — a little layer, a lot of personality</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='editor.css') }}">
-  <script id="editor-config" type="application/json">{{ {'maxUploadMb': max_upload_mb, 'analyzeUrl': url_for('analyze'), 'overlayUrl': url_for('overlay')} | tojson }}</script>
+  <script id="editor-config" type="application/json">{{ {'maxUploadMb': max_upload_mb, 'analyzeUrl': url_for('analyze'), 'overlayUrl': url_for('overlay'), 'jobsUrl': url_for('create_job')} | tojson }}</script>
   <script src="{{ url_for('static', filename='editor.js') }}" defer></script>
 </head>
 <body>
