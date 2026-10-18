@@ -260,7 +260,8 @@ def _to_paletted(
             outside[top:bottom, left:right] = False
             base_keys = np.unique(keys[outside])
             slots = limit - len(base_keys)
-            if slots >= 0 and len(base_keys) + slots > 0:
+            palette_keys = np.zeros(0, dtype=np.uint32)
+            if slots >= 0:
                 crop = rgba.convert("RGB").crop(overlay_box)
                 extra = np.zeros(0, dtype=np.uint32)
                 if slots > 0:
@@ -274,6 +275,7 @@ def _to_paletted(
                     extra = (qpal[:, 0] << 16) | (qpal[:, 1] << 8) | qpal[:, 2]
                     extra = np.setdiff1d(extra, base_keys)
                 palette_keys = np.concatenate([base_keys, extra])[:limit]
+            if slots >= 0 and len(palette_keys) > 0:
                 indices = _exact_indices(keys, palette_keys)
                 # Dither the overlay area against the whole palette.
                 colors = _keys_to_colors(palette_keys)
@@ -354,10 +356,6 @@ def overlay_gif(
 
         canvas = frame.convert("RGBA")
         x, y = _overlay_position(base_size, ov.size, opts)
-        layer = Image.new("RGBA", base_size, (0, 0, 0, 0))
-        layer.paste(ov, (x, y))
-        canvas = Image.alpha_composite(canvas, layer)
-
         box = (
             max(0, x),
             max(0, y),
@@ -365,6 +363,12 @@ def overlay_gif(
             min(base_size[1], y + ov.height),
         )
         overlay_box = box if box[0] < box[2] and box[1] < box[3] else None
+        if overlay_box is not None:
+            canvas.alpha_composite(
+                ov,
+                dest=overlay_box[:2],
+                source=(overlay_box[0] - x, overlay_box[1] - y),
+            )
         out_frames.append(_to_paletted(canvas, overlay_box))
 
     save_kwargs: dict = {

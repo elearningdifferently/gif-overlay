@@ -239,3 +239,29 @@ def test_overlay_too_large():
         overlay_gif(make_gif(), make_png((300, 300)), max_pixels=50_000)
     with pytest.raises(GifOverlayError):
         overlay_gif(make_gif(), make_png(), OverlayOptions(scale=1000), max_pixels=50_000)
+
+
+def test_overlay_partially_off_canvas():
+    gif = make_gif()
+    opts = OverlayOptions(position="custom", x=-10, y=-5)
+    out, _ = overlay_gif(gif, make_png(), opts)
+    green = Image.new("RGBA", (20, 20), (0, 255, 0, 255))
+    for src, dst in zip(frames_of(gif), frames_of(out)):
+        src.alpha_composite(green, (0, 0), (10, 5))
+        assert pixels(src) == pixels(dst)
+    # Fully outside: GIF is unchanged.
+    out, _ = overlay_gif(gif, make_png(), OverlayOptions(position="custom", x=500, y=500))
+    assert [pixels(f) for f in frames_of(out)] == [pixels(f) for f in frames_of(gif)]
+
+
+def test_overlay_endpoint_rejects_non_finite(client):
+    for value in ("inf", "nan"):
+        res = client.post(
+            "/overlay",
+            data={
+                "gif": (io.BytesIO(make_gif()), "a.gif"),
+                "overlay": (io.BytesIO(make_png()), "logo.png"),
+                "margin": value,
+            },
+        )
+        assert res.status_code == 400

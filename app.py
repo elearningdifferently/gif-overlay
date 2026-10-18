@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -19,7 +20,7 @@ from gif_overlay import (
 
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
 # Upper bound on width * height * frames to protect the server's memory.
-MAX_PIXELS = int(os.environ.get("MAX_PIXELS", str(150_000_000)))
+MAX_PIXELS = int(os.environ.get("MAX_PIXELS", str(100_000_000)))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
@@ -40,8 +41,11 @@ def _number(name: str, default: float, cast=float):
     if raw.strip() == "":
         return default
     try:
-        return cast(raw)
-    except ValueError as exc:
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(raw)
+        return cast(value)
+    except (ValueError, OverflowError) as exc:
         raise GifOverlayError(f"'{name}' must be a number.") from exc
 
 

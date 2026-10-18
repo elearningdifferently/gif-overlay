@@ -58,7 +58,7 @@ Health check endpoint: `/health`.
 | Variable        | Default     | Description                                          |
 |-----------------|-------------|------------------------------------------------------|
 | `MAX_UPLOAD_MB` | `50`        | Maximum request size in MB.                          |
-| `MAX_PIXELS`    | `150000000` | Max `width × height × frames` of a GIF (memory cap). |
+| `MAX_PIXELS`    | `100000000` | Max `width × height × frames` of a GIF (memory cap). |
 | `PORT`          | `8080`      | Port to listen on (set by App Platform).             |
 
 ## API
