@@ -9,7 +9,8 @@ import os
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
-from jobs import JobQueueFull, JobRegistry
+from archives import create_zip
+from jobs import MAX_BATCH_FILES, JobQueueFull, JobRegistry
 
 from gif_overlay import (
     POSITIONS,
@@ -63,7 +64,10 @@ def _handle_too_large(_exc):
 
 @app.get("/")
 def index():
-    return render_template("index.html", positions=POSITIONS, max_upload_mb=MAX_UPLOAD_MB)
+    return render_template(
+        "index.html", positions=POSITIONS, max_upload_mb=MAX_UPLOAD_MB,
+        max_batch_files=MAX_BATCH_FILES,
+    )
 
 
 @app.get("/health")
@@ -95,8 +99,10 @@ def _overlay_options():
     return opts
 
 
-def _download_name():
-    base_name = os.path.splitext(secure_filename(request.files["gif"].filename))[0] or "image"
+def _download_name(filename=None):
+    if filename is None:
+        filename = request.files["gif"].filename
+    base_name = os.path.splitext(secure_filename(filename))[0] or "image"
     return f"{base_name}-overlay.gif"
 
 
@@ -113,6 +119,7 @@ def create_job():
 
 
 @app.get("/jobs/<job_id>")
+@app.get("/batches/<job_id>")
 def job_status(job_id):
     status = job_registry.status(job_id)
     if status is None:
@@ -123,8 +130,9 @@ def job_status(job_id):
 
 
 @app.get("/jobs/<job_id>/result")
-def job_result(job_id):
-    job, output = job_registry.result(job_id)
+@app.get("/batches/<job_id>/files/<int:file_id>/result")
+def job_result(job_id, file_id=None):
+    job, output = job_registry.result(job_id, file_id)
     if job is None:
         return jsonify(error="Job not found or expired. Please submit it again."), 404
     if output is None:
@@ -141,6 +149,56 @@ def job_result(job_id):
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Gif-Frames"] = str(job.frame_count)
     response.headers["X-Gif-Size"] = job.size
+    return response
+
+
+@app.post("/batches")
+def create_batch():
+    uploads = request.files.getlist("gifs")
+    if not 1 <= len(uploads) <= MAX_BATCH_FILES:
+        raise GifOverlayError(f"Choose between 1 and {MAX_BATCH_FILES} GIF files.")
+    overlay_data = _read_upload("overlay")
+    opts = _overlay_options()
+    files, names = [], set()
+    for upload in uploads:
+        if not upload.filename:
+            raise GifOverlayError("Each GIF must have a filename.")
+        data = upload.read()
+        if not data:
+            raise GifOverlayError("An uploaded GIF file is empty.")
+        name = _download_name(upload.filename)
+        stem = name[:-4]
+        suffix = 2
+        while name.casefold() in names:
+            name = f"{stem}-{suffix}.gif"
+            suffix += 1
+        names.add(name.casefold())
+        files.append((data, name))
+    try:
+        status = job_registry.submit_batch(files, overlay_data, opts)
+    except JobQueueFull:
+        return jsonify(error="The job queue is full. Please try again later."), 503
+    return jsonify(status), 202
+
+
+@app.get("/batches/<job_id>/archive")
+def batch_archive(job_id):
+    with job_registry.archive_sources(job_id) as (job, sources):
+        if job is None or job.files is None:
+            return jsonify(error="Batch not found or expired. Please submit it again."), 404
+        if not sources:
+            return jsonify(**job.status()), 409
+        output = create_zip(sources)
+    try:
+        response = send_file(
+            output, mimetype="application/zip", as_attachment=True,
+            download_name="gifs-overlay.zip",
+        )
+    except Exception:
+        output.close()
+        raise
+    response.call_on_close(output.close)
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

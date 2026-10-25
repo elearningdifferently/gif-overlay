@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Queue
@@ -13,6 +14,29 @@ import time
 from uuid import uuid4
 
 from gif_overlay import GifOverlayError, OverlayOptions, overlay_gif
+
+MAX_BATCH_FILES = 100
+
+
+@dataclass
+class BatchFile:
+    gif_path: Path
+    download_name: str
+    state: str = "queued"
+    progress: str = "Waiting in queue."
+    output_path: Path | None = None
+    error: str | None = None
+    frame_count: int | None = None
+    size: str | None = None
+
+    def status(self):
+        return {
+            "download_name": self.download_name,
+            "state": self.state,
+            "progress": self.progress,
+            "error": self.error,
+            "result_available": self.state == "done",
+        }
 
 
 @dataclass
@@ -31,9 +55,10 @@ class Job:
     error: str | None = None
     frame_count: int | None = None
     size: str | None = None
+    files: list[BatchFile] | None = None
 
     def status(self):
-        return {
+        status = {
             "job_id": self.id,
             "state": self.state,
             "created_at": self.created_at,
@@ -42,6 +67,18 @@ class Job:
             "error": self.error,
             "result_available": self.state == "done",
         }
+        if self.files is not None:
+            completed = sum(file.state in ("done", "error") for file in self.files)
+            succeeded = sum(file.state == "done" for file in self.files)
+            status.update(
+                files=[dict(file.status(), file_id=index) for index, file in enumerate(self.files)],
+                total=len(self.files), completed=completed, succeeded=succeeded,
+                failed=completed - succeeded,
+                percentage=completed * 100 // len(self.files),
+                progress=f"{completed} of {len(self.files)} completed",
+                result_available=self.state == "done" and succeeded > 0,
+            )
+        return status
 
 
 class JobQueueFull(Exception):
@@ -69,6 +106,14 @@ class JobRegistry:
             Thread(target=self._reap, name="gif-cleanup", daemon=True).start()
 
     def submit(self, gif_data, overlay_data, options, download_name):
+        return self._submit([(gif_data, download_name)], overlay_data, options, batch=False)
+
+    def submit_batch(self, files, overlay_data, options):
+        if not 1 <= len(files) <= MAX_BATCH_FILES:
+            raise GifOverlayError(f"Choose between 1 and {MAX_BATCH_FILES} GIF files.")
+        return self._submit(files, overlay_data, options, batch=True)
+
+    def _submit(self, files, overlay_data, options, *, batch):
         self.cleanup()
         with self.lock:
             if self.stopped.is_set() or len(self.jobs) >= self.max_jobs:
@@ -79,9 +124,16 @@ class JobRegistry:
                 job = Job(
                     str(uuid4()), now, now, directory,
                     Path(directory) / "input.gif", Path(directory) / "overlay",
-                    options, download_name,
+                    options, files[0][1],
                 )
-                job.gif_path.write_bytes(gif_data)
+                if batch:
+                    job.files = []
+                    for index, (data, name) in enumerate(files):
+                        path = Path(directory) / f"input-{index}.gif"
+                        path.write_bytes(data)
+                        job.files.append(BatchFile(path, name))
+                else:
+                    job.gif_path.write_bytes(files[0][0])
                 job.overlay_path.write_bytes(overlay_data)
                 self._start()
                 self.jobs[job.id] = job
@@ -98,16 +150,37 @@ class JobRegistry:
             job = self.jobs.get(job_id)
             return job.status() if job else None
 
-    def result(self, job_id):
+    def result(self, job_id, file_id=None):
         self.cleanup()
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
                 return None, None
+            if file_id is not None:
+                if job.files is None or not 0 <= file_id < len(job.files):
+                    return None, None
+                job = job.files[file_id]
+            elif job.files is not None:
+                return replace(job), None
             # Open under the same lock as expiry; an active download keeps its
             # descriptor even if cleanup subsequently unlinks the temporary file.
             output = job.output_path.open("rb") if job.state == "done" else None
             return replace(job), output
+
+    @contextmanager
+    def archive_sources(self, job_id):
+        self.cleanup()
+        with ExitStack() as stack:
+            with self.lock:
+                job = self.jobs.get(job_id)
+                sources = []
+                if job is not None and job.files is not None and job.state == "done":
+                    sources = [
+                        (file.download_name, stack.enter_context(file.output_path.open("rb")))
+                        for file in job.files if file.state == "done"
+                    ]
+                snapshot = replace(job) if job else None
+            yield snapshot, sources
 
     def _work(self):
         while True:
@@ -121,35 +194,48 @@ class JobRegistry:
                     job.state = "processing"
                     job.progress = "Rendering GIF."
                     job.updated_at = self.clock()
-                try:
-                    result, info = overlay_gif(
-                        job.gif_path.read_bytes(), job.overlay_path.read_bytes(),
-                        job.options, max_pixels=self.max_pixels,
-                    )
+                for index, file in enumerate(job.files if job.files is not None else [job]):
                     with self.lock:
                         if self.stopped.is_set():
-                            continue
-                        job.output_path = Path(job.directory) / "result.gif"
-                        job.output_path.write_bytes(result)
-                        job.frame_count = info.frame_count
-                        job.size = f"{info.width}x{info.height}"
-                        job.state = "done"
-                        job.progress = "Export complete."
-                except Exception as exc:
-                    with self.lock:
-                        job.state = "error"
-                        job.progress = "Export failed."
-                        job.error = (str(exc) if isinstance(exc, GifOverlayError)
-                                     else "GIF generation failed. Please try again.")
-                        if job.output_path is not None:
-                            job.output_path.unlink(missing_ok=True)
-                            job.output_path = None
-                finally:
-                    result = None
-                    with self.lock:
-                        job.gif_path.unlink(missing_ok=True)
-                        job.overlay_path.unlink(missing_ok=True)
+                            break
+                        file.state = "processing"
+                        file.progress = "Rendering GIF."
                         job.updated_at = self.clock()
+                    try:
+                        result, info = overlay_gif(
+                            file.gif_path.read_bytes(), job.overlay_path.read_bytes(),
+                            job.options, max_pixels=self.max_pixels,
+                        )
+                        with self.lock:
+                            if self.stopped.is_set():
+                                break
+                            file.output_path = Path(job.directory) / f"result-{index}.gif"
+                            file.output_path.write_bytes(result)
+                            file.frame_count = info.frame_count
+                            file.size = f"{info.width}x{info.height}"
+                            file.state = "done"
+                            file.progress = "Export complete."
+                    except Exception as exc:
+                        with self.lock:
+                            file.state = "error"
+                            file.progress = "Export failed."
+                            file.error = (str(exc) if isinstance(exc, GifOverlayError)
+                                          else "GIF generation failed. Please try again.")
+                            if file.output_path is not None:
+                                file.output_path.unlink(missing_ok=True)
+                                file.output_path = None
+                    finally:
+                        result = None
+                        with self.lock:
+                            file.gif_path.unlink(missing_ok=True)
+                            job.updated_at = self.clock()
+                with self.lock:
+                    if job.files is not None:
+                        job.state = "done" if any(file.state == "done" for file in job.files) else "error"
+                        if job.state == "error":
+                            job.error = "No GIFs could be processed. See individual file errors."
+                    job.overlay_path.unlink(missing_ok=True)
+                    job.updated_at = self.clock()
             finally:
                 self.pending.task_done()
 

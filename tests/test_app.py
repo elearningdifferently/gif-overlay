@@ -108,14 +108,19 @@ def test_editor_config_and_static_assets(client):
     page = EditorHTML(response.get_data(as_text=True))
     assert page.config == {
         "maxUploadMb": app_module.MAX_UPLOAD_MB,
+        "maxBatchFiles": 100,
         "analyzeUrl": "/analyze",
         "overlayUrl": "/overlay",
         "jobsUrl": "/jobs",
+        "batchesUrl": "/batches",
     }
     script_urls = [url for url in page.scripts if urlsplit(url).path.endswith("/editor.js")]
     style_urls = [url for url in page.stylesheets if urlsplit(url).path.endswith("/editor.css")]
     assert script_urls
     assert style_urls
+    assert page.inputs["batch-mode"]["type"] == "checkbox"
+    assert "checked" not in page.inputs["batch-mode"]
+    assert "multiple" not in page.inputs["gif"]
     for url in script_urls + style_urls:
         asset = client.get(url)
         assert asset.status_code == 200
