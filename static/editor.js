@@ -16,6 +16,10 @@
   let resultUrl = null;
   let busy = false;
   let exportProgress = "";
+  let batchFiles = [];
+  let batchStatus = null;
+  let batchJobUrl = null;
+  const batchMode = () => $("batch-mode").checked;
   const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay",
     "crop_x", "crop_y", "crop_width", "crop_height"];
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -28,7 +32,9 @@
   updateMotion();
   const bytes = (size) => size < 1024 * 1024
     ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(2)} MB`;
-  const combinedSize = () => Object.values(layers).reduce((sum, layer) => sum + (layer.file?.size || 0), 0);
+  const combinedSize = () => (batchMode()
+    ? batchFiles.reduce((sum, file) => sum + file.size, 0) : layers.gif.file?.size || 0)
+    + (layers.overlay.file?.size || 0);
 
   function clearResult() {
     $("result-fig").hidden = true;
@@ -38,6 +44,48 @@
     $("download-name").textContent = "";
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     resultUrl = null;
+    batchStatus = null;
+    batchJobUrl = null;
+  }
+
+  function renderBatch() {
+    $("batch-panel").hidden = !batchMode() || !batchFiles.length;
+    $("batch-progress").value = batchStatus?.percentage || 0;
+    $("batch-summary").textContent = batchStatus
+      ? `${batchStatus.completed} of ${batchStatus.total} completed · ${batchStatus.percentage}% · ${batchStatus.failed} errors`
+      : `${batchFiles.length} GIFs selected · Preview shows the first file.`;
+    $("batch-download").hidden = !(batchStatus?.state === "done" && batchStatus.result_available);
+    if (batchJobUrl) {
+      $("batch-download").href = `${batchJobUrl}/archive`;
+      $("batch-download").download = "gifs-overlay.zip";
+    } else {
+      $("batch-download").removeAttribute("href");
+    }
+    const rows = batchFiles.map((file, index) => {
+      const item = batchStatus?.files[index];
+      const row = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "batch-name";
+      name.textContent = file.name;
+      const state = document.createElement("span");
+      state.textContent = item?.state || "queued";
+      row.append(name, state);
+      if (item?.error) {
+        const error = document.createElement("p");
+        error.className = "field-error";
+        error.textContent = item.error;
+        row.append(error);
+      }
+      if (item?.result_available && batchJobUrl) {
+        const link = document.createElement("a");
+        link.textContent = "Download GIF";
+        link.href = `${batchJobUrl}/files/${index}/result`;
+        link.download = item.download_name;
+        row.append(link);
+      }
+      return row;
+    });
+    $("batch-files").replaceChildren(...rows);
   }
 
   function compositionChanged() {
@@ -53,9 +101,11 @@
 
   function update() {
     const total = combinedSize();
-    const ready = Boolean(layers.gif.file && layers.overlay.file && info);
+    const ready = Boolean(layers.gif.file && layers.overlay.file && (batchMode() ? batchFiles.length : info));
     $("submit").disabled = busy || !ready || total >= limit || !settingsValid();
-    $("submit").textContent = busy ? "Creating GIF…" : "Create GIF ↗";
+    $("submit").textContent = batchMode()
+      ? (busy ? "Creating GIFs…" : "Create batch ↗")
+      : (busy ? "Creating GIF…" : "Create GIF ↗");
     $("form").setAttribute("aria-busy", String(busy));
     $("size-summary").textContent = total
       ? `${bytes(total)} combined · ${config.maxUploadMb} MB request limit (plus form data).`
@@ -64,16 +114,19 @@
       $("status").textContent = "Files exceed the request budget. Choose smaller files; form data also needs space.";
     } else if (busy) {
       $("status").textContent = exportProgress;
+    } else if (batchStatus && ["done", "error"].includes(batchStatus.state)) {
+      $("status").textContent = `Batch finished: ${batchStatus.succeeded} successful, ${batchStatus.failed} failed. Download available GIFs below the preview.`;
     } else if (resultUrl) {
       $("status").textContent = "Export complete. Preview and download your GIF below.";
     } else if (!layers.gif.file || !layers.overlay.file) {
       $("status").textContent = "Add both files to get started.";
-    } else if (!info) {
+    } else if (!info && !batchMode()) {
       $("status").textContent = "A valid base GIF analysis is required before export.";
     } else {
       $("status").textContent = settingsValid() ? "Your layers are ready. Create your GIF when it looks right." : "Check the placement and crop values before exporting.";
     }
     $("custom-controls").hidden = $("position").value !== "custom";
+    renderBatch();
     renderPreview();
   }
 
@@ -153,7 +206,7 @@
       if (typeof body.error === "string") message = body.error;
     } catch { /* Proxies may return HTML or an empty body. Never display it. */ }
     if (response.status === 413) {
-      return `Request too large. Both files and form data must fit within ${config.maxUploadMb} MB; the host may impose a smaller limit.`;
+      return `Request too large. All files and form data must fit within ${config.maxUploadMb} MB; the host may impose a smaller limit.`;
     }
     if (jobRequest && response.status === 404) {
       return `${message || "This export is no longer available."} The job may have expired or the server restarted. Click Create GIF to retry.`;
@@ -227,6 +280,7 @@
   function clearLayer(name) {
     const layer = layers[name];
     if (name === "gif") {
+      batchFiles = [];
       analysisController?.abort();
       analysisController = null;
       info = null;
@@ -252,17 +306,22 @@
     if (!files.length) return;
     clearLayer(name);
     compositionChanged();
-    if (files.length !== 1) {
+    const batch = name === "gif" && batchMode();
+    if (batch && files.length > config.maxBatchFiles) {
+      $(name + "-error").textContent = `Choose at most ${config.maxBatchFiles} GIFs per batch.`;
+      return;
+    }
+    if (!batch && files.length !== 1) {
       $(name + "-error").textContent = "Choose one file for this layer.";
       return;
     }
     const file = files[0];
-    if (!file.size) {
+    if (files.some((item) => !item.size)) {
       $(name + "-error").textContent = "This file is empty. Choose another image.";
       return;
     }
     // A missing or misleading MIME is common: extensions are a fallback, not proof.
-    if (name === "gif" && file.type !== "image/gif" && !/\.gif$/i.test(file.name)) {
+    if (name === "gif" && files.some((item) => item.type !== "image/gif" && !/\.gif$/i.test(item.name))) {
       $(name + "-error").textContent = "Choose a GIF for the base layer. The server checks its contents.";
       return;
     }
@@ -270,12 +329,13 @@
       $(name + "-error").textContent = "Choose an image such as PNG, GIF, JPEG or WebP. The server checks format support.";
       return;
     }
-    if (file.size + combinedSize() >= limit) {
-      $(name + "-error").textContent = `Both files must fit within ${config.maxUploadMb} MB per request, with room for form data. Choose a smaller file.`;
+    if (files.reduce((sum, item) => sum + item.size, 0) + combinedSize() >= limit) {
+      $(name + "-error").textContent = `All files must fit within ${config.maxUploadMb} MB per request, with room for form data. Choose smaller files.`;
       update();
       return;
     }
     const layer = layers[name];
+    if (batch) batchFiles = files;
     layer.file = file;
     layer.url = URL.createObjectURL(file);
     const url = layer.url;
@@ -294,7 +354,8 @@
     };
     image.src = url;
     $(name === "gif" ? "base-preview" : "overlay-preview").src = url;
-    $(name + "-detail").textContent = `${file.name} · ${bytes(file.size)}`;
+    $(name + "-detail").textContent = batch
+      ? `${files.length} GIFs · First: ${file.name}` : `${file.name} · ${bytes(file.size)}`;
     $(name + "-remove").hidden = false;
     if (name === "gif") analyze(file);
     update();
@@ -341,24 +402,36 @@
   });
   $("reset-editor").addEventListener("click", () => {
     form.reset();
+    $("gif").multiple = false;
     clearLayer("gif");
     clearLayer("overlay");
     updateMotion();
     compositionChanged();
     $("gif").focus();
   });
+  $("batch-mode").addEventListener("change", () => {
+    $("gif").multiple = batchMode();
+    clearLayer("gif");
+    compositionChanged();
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy || !info || !layers.gif.file || !layers.overlay.file || !form.reportValidity()) return;
+    if (busy || (!info && !batchMode()) || !layers.gif.file || !layers.overlay.file || !form.reportValidity()) return;
+    const batch = batchMode();
+    const jobsUrl = batch ? config.batchesUrl : config.jobsUrl;
     const data = new FormData();
-    data.append("gif", layers.gif.file);
+    if (batch) {
+      for (const file of batchFiles) data.append("gifs", file);
+    } else {
+      data.append("gif", layers.gif.file);
+    }
     data.append("overlay", layers.overlay.file);
     for (const name of settings) {
       data.append(name, $(name).type === "checkbox" ? $(name).checked : $(name).value);
     }
     busy = true;
-    exportProgress = "Uploading files to queue your GIF…";
+    exportProgress = batch ? "Uploading files to queue your batch…" : "Uploading files to queue your GIF…";
     const currentRevision = revision;
     const controller = new AbortController();
     exportController = controller;
@@ -369,13 +442,13 @@
     update();
     try {
       // Measure the serialized multipart body, including headers, names and boundaries.
-      const request = new Request(config.jobsUrl, { method: "POST", body: data });
+      const request = new Request(jobsUrl, { method: "POST", body: data });
       const body = await request.blob();
       if (stale()) return;
       if (body.size > limit) {
         throw new Error(`The complete request exceeds ${config.maxUploadMb} MB including form data. Choose smaller files.`);
       }
-      const created = await fetch(config.jobsUrl, { method: "POST", body, headers: { "Content-Type": request.headers.get("Content-Type") }, signal: controller.signal });
+      const created = await fetch(jobsUrl, { method: "POST", body, headers: { "Content-Type": request.headers.get("Content-Type") }, signal: controller.signal });
       const job = await readJob(created);
       if (stale()) return;
       if (created.status !== 202 || !job || typeof job.job_id !== "string"
@@ -383,7 +456,11 @@
           || job.state !== "queued") {
         throw new Error("The server returned invalid job information. Click Create GIF to retry.");
       }
-      const jobUrl = `${config.jobsUrl.replace(/\/$/, "")}/${encodeURIComponent(job.job_id)}`;
+      const jobUrl = `${jobsUrl.replace(/\/$/, "")}/${encodeURIComponent(job.job_id)}`;
+      if (batch) {
+        batchStatus = job;
+        batchJobUrl = jobUrl;
+      }
       exportProgress = "Queued. Waiting for the server to create your GIF…";
       update();
       while (true) {
@@ -395,6 +472,11 @@
             || !["queued", "processing", "done", "error", "failed"].includes(status.state)) {
           throw new Error("The server returned invalid job information. Click Create GIF to retry.");
         }
+        if (batch) {
+          batchStatus = status;
+          exportProgress = `${status.progress} · ${status.percentage}% · ${status.failed} errors`;
+          update();
+        }
         if (status.state === "error" || status.state === "failed") {
           throw new Error(typeof status.error === "string" && status.error
             ? status.error : "The server could not create your GIF. Click Create GIF to retry.");
@@ -405,10 +487,12 @@
           }
           break;
         }
+        if (batch) continue;
         const progress = typeof status.progress === "string" && status.progress ? ` ${status.progress}` : "";
         exportProgress = `${status.state === "queued" ? "Queued." : "Processing on the server."}${progress}`;
         update();
       }
+      if (batch) return;
       const response = await fetch(`${jobUrl}/result`, { signal: controller.signal });
       if (!response.ok) throw new Error(await apiError(response, true));
       if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("image/gif")) {

@@ -19,6 +19,13 @@ animated GIF, with palette-aware quality preservation.
   in Composition preview. Blank dimensions keep the remaining canvas; bounds
   are clamped, and empty/out-of-bounds crops fall back to the full frame.
 - Download the result as `<name>-overlay.gif`.
+- Enable **Batch mode** to upload up to 100 GIFs with one overlay and shared
+  settings (including crop). The preview shows the first GIF; placement and
+  scaling are applied to each file's own dimensions. Track queued, processing,
+  done and error statuses, completed-file counts and overall percentage.
+- Download successful batch results individually or together as
+  `gifs-overlay.zip`. Filenames are sanitized and duplicates receive numeric
+  suffixes. A failed file does not stop the rest of the batch.
 - Preview placement before rendering, compare the generated result, and reset
   the editor to start again. Processing states and inline errors guide uploads
   and downloads; keyboard-accessible controls also work on smaller screens.
@@ -76,6 +83,23 @@ One background rendering thread consumes a FIFO queue inside the existing web
 service. Rendering uses the same implementation as the synchronous `/overlay`
 endpoint, which remains available for compatibility. No database, SQL, Redis,
 account, session, or separate App Platform Worker component is used.
+
+Batch clients submit multipart `POST /batches` with repeated `gifs` fields,
+one `overlay`, and the same settings fields as `/jobs`. Poll
+`GET /batches/<job_id>` for `files` (zero-based `file_id`, output filename,
+state, progress, error and availability), `total`, `completed`, `succeeded`,
+`failed`, and `percentage`. Completed counts include failures. A batch ends
+as `done` when at least one file succeeds, otherwise `error`.
+Download each successful file from
+`GET /batches/<job_id>/files/<file_id>/result`; after the batch finishes,
+`GET /batches/<job_id>/archive` includes all successful outputs.
+Unavailable results return HTTP 409, and unknown/expired IDs return HTTP 404.
+ZIP creation copies files in chunks to an automatically deleted temporary
+archive, then streams that archive to the client without loading it into RAM.
+Each batch occupies one registry slot and processes its files sequentially
+on the existing worker to bound rendering memory. The upload limit covers
+the entire batch request; the pixel limit applies separately to each GIF.
+Batch results expire together 15 minutes after the last file finishes.
 
 **Keep `--workers 1` in the Procfile and exactly one App Platform instance.**
 Each process/instance has its own memory and temporary files; multiple workers
