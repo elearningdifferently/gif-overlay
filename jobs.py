@@ -14,6 +14,7 @@ import time
 from uuid import uuid4
 
 from gif_overlay import GifOverlayError, OverlayOptions, overlay_gif
+from uploads import copy_upload
 
 MAX_BATCH_FILES = 100
 
@@ -92,6 +93,7 @@ class JobRegistry:
         self.max_jobs = max_jobs
         self.clock = clock
         self.jobs = {}
+        self.staging = {}
         self.lock = Lock()
         self.pending = Queue()
         self.stopped = Event()
@@ -105,44 +107,62 @@ class JobRegistry:
             Thread(target=self._work, name="gif-renderer", daemon=True).start()
             Thread(target=self._reap, name="gif-cleanup", daemon=True).start()
 
-    def submit(self, gif_data, overlay_data, options, download_name):
-        return self._submit([(gif_data, download_name)], overlay_data, options, batch=False)
+    def submit(self, gif_stream, overlay_stream, options, download_name, *, max_file_bytes):
+        return self._submit([(gif_stream, download_name)], overlay_stream, options,
+                            batch=False, max_file_bytes=max_file_bytes)
 
-    def submit_batch(self, files, overlay_data, options):
+    def submit_batch(self, files, overlay_stream, options, *, max_file_bytes):
         if not 1 <= len(files) <= MAX_BATCH_FILES:
             raise GifOverlayError(f"Choose between 1 and {MAX_BATCH_FILES} GIF files.")
-        return self._submit(files, overlay_data, options, batch=True)
+        return self._submit(files, overlay_stream, options, batch=True,
+                            max_file_bytes=max_file_bytes)
 
-    def _submit(self, files, overlay_data, options, *, batch):
+    def _submit(self, files, overlay_stream, options, *, batch, max_file_bytes):
         self.cleanup()
+        token = str(uuid4())
         with self.lock:
-            if self.stopped.is_set() or len(self.jobs) >= self.max_jobs:
+            if self.stopped.is_set() or len(self.jobs) + len(self.staging) >= self.max_jobs:
                 raise JobQueueFull()
+            self._start()
+            self.staging[token] = None
+        directory = None
+        enqueued = False
+        try:
             directory = tempfile.mkdtemp(prefix="gif-overlay-")
-            try:
-                now = self.clock()
-                job = Job(
-                    str(uuid4()), now, now, directory,
-                    Path(directory) / "input.gif", Path(directory) / "overlay",
-                    options, files[0][1],
-                )
+            with self.lock:
+                if self.stopped.is_set():
+                    raise JobQueueFull()
+                self.staging[token] = directory
+            now = self.clock()
+            job = Job(
+                token, now, now, directory,
+                Path(directory) / "input.gif", Path(directory) / "overlay",
+                options, files[0][1],
+            )
+            if batch:
+                job.files = []
+            for index, (stream, name) in enumerate(files):
+                path = Path(directory) / f"input-{index}.gif" if batch else job.gif_path
+                with path.open("wb") as target:
+                    copy_upload(stream, target, max_file_bytes)
                 if batch:
-                    job.files = []
-                    for index, (data, name) in enumerate(files):
-                        path = Path(directory) / f"input-{index}.gif"
-                        path.write_bytes(data)
-                        job.files.append(BatchFile(path, name))
-                else:
-                    job.gif_path.write_bytes(files[0][0])
-                job.overlay_path.write_bytes(overlay_data)
-                self._start()
+                    job.files.append(BatchFile(path, name))
+            with job.overlay_path.open("wb") as target:
+                copy_upload(overlay_stream, target, max_file_bytes)
+            with self.lock:
+                if self.stopped.is_set():
+                    raise JobQueueFull()
+                self.staging.pop(token, None)
                 self.jobs[job.id] = job
                 status = job.status()
                 self.pending.put(job)
+                enqueued = True
                 return status
-            except Exception:
+        finally:
+            with self.lock:
+                self.staging.pop(token, None)
+            if directory is not None and not enqueued:
                 shutil.rmtree(directory, ignore_errors=True)
-                raise
 
     def status(self, job_id):
         self.cleanup()
@@ -257,6 +277,9 @@ class JobRegistry:
             if self.stopped.is_set():
                 return
             self.stopped.set()
+            for directory in self.staging.values():
+                if directory is not None:
+                    shutil.rmtree(directory, ignore_errors=True)
             for job in self.jobs.values():
                 shutil.rmtree(job.directory, ignore_errors=True)
             self.jobs.clear()

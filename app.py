@@ -11,6 +11,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 from archives import create_zip
 from jobs import MAX_BATCH_FILES, JobQueueFull, JobRegistry
+from uploads import DiskUploadRequest, FileTooLarge, copy_upload
 
 from gif_overlay import (
     POSITIONS,
@@ -21,22 +22,38 @@ from gif_overlay import (
 )
 
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "100"))
+MAX_BATCH_UPLOAD_MB = int(os.environ.get("MAX_BATCH_UPLOAD_MB", "1024"))
+MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "100"))
 # Upper bound on width * height * frames to protect the server's memory.
 MAX_PIXELS = int(os.environ.get("MAX_PIXELS", str(950_000_000)))
 
 app = Flask(__name__)
+app.request_class = DiskUploadRequest
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+app.config["MAX_BATCH_CONTENT_LENGTH"] = MAX_BATCH_UPLOAD_MB * 1024 * 1024
+app.config["MAX_FILE_LENGTH"] = MAX_FILE_MB * 1024 * 1024
+# 100 GIFs, one overlay and settings fit below Werkzeug's 1000-part default.
+app.config["MAX_FORM_PARTS"] = 1000
 job_registry = JobRegistry(MAX_PIXELS)
 
 
-def _read_upload(name: str) -> bytes:
+@app.before_request
+def _request_limit():
+    if request.endpoint == "create_batch":
+        request.max_content_length = app.config["MAX_BATCH_CONTENT_LENGTH"]
+
+
+def _upload(name):
     file = request.files.get(name)
     if file is None or not file.filename:
         raise GifOverlayError(f"Please upload a file for '{name}'.")
-    data = file.read()
-    if not data:
-        raise GifOverlayError(f"The uploaded '{name}' file is empty.")
-    return data
+    return file
+
+
+def _read_upload(name: str) -> bytes:
+    data = io.BytesIO()
+    copy_upload(_upload(name).stream, data, app.config["MAX_FILE_LENGTH"])
+    return data.getvalue()
 
 
 def _number(name: str, default: float, cast=float):
@@ -58,8 +75,16 @@ def _handle_user_error(exc: GifOverlayError):
 
 
 @app.errorhandler(RequestEntityTooLarge)
-def _handle_too_large(_exc):
-    return jsonify(error=f"Upload too large (limit {MAX_UPLOAD_MB} MB)."), 413
+def _handle_too_large(exc):
+    if isinstance(exc, FileTooLarge):
+        return jsonify(error=f"Each uploaded file must be at most {app.config['MAX_FILE_LENGTH'] / 1024**2:g} MiB (GIFs and overlay)."), 413
+    limit = request.max_content_length / 1024**2
+    return jsonify(error=f"Upload too large: total request limit {limit:g} MiB, including all files and multipart form data. Multipart field/part limits also apply."), 413
+
+
+@app.errorhandler(OSError)
+def _handle_storage_error(_exc):
+    return jsonify(error="Temporary upload storage unavailable. Please try again later."), 503
 
 
 @app.get("/")
@@ -67,6 +92,7 @@ def index():
     return render_template(
         "index.html", positions=POSITIONS, max_upload_mb=MAX_UPLOAD_MB,
         max_batch_files=MAX_BATCH_FILES,
+        max_batch_upload_mb=MAX_BATCH_UPLOAD_MB, max_file_mb=MAX_FILE_MB,
     )
 
 
@@ -108,11 +134,14 @@ def _download_name(filename=None):
 
 @app.post("/jobs")
 def create_job():
-    gif_data = _read_upload("gif")
-    overlay_data = _read_upload("overlay")
+    gif = _upload("gif")
+    overlay = _upload("overlay")
     opts = _overlay_options()
     try:
-        status = job_registry.submit(gif_data, overlay_data, opts, _download_name())
+        status = job_registry.submit(
+            gif.stream, overlay.stream, opts, _download_name(),
+            max_file_bytes=app.config["MAX_FILE_LENGTH"],
+        )
     except JobQueueFull:
         return jsonify(error="The job queue is full. Please try again later."), 503
     return jsonify(status), 202
@@ -157,15 +186,12 @@ def create_batch():
     uploads = request.files.getlist("gifs")
     if not 1 <= len(uploads) <= MAX_BATCH_FILES:
         raise GifOverlayError(f"Choose between 1 and {MAX_BATCH_FILES} GIF files.")
-    overlay_data = _read_upload("overlay")
+    overlay = _upload("overlay")
     opts = _overlay_options()
     files, names = [], set()
     for upload in uploads:
         if not upload.filename:
             raise GifOverlayError("Each GIF must have a filename.")
-        data = upload.read()
-        if not data:
-            raise GifOverlayError("An uploaded GIF file is empty.")
         name = _download_name(upload.filename)
         stem = name[:-4]
         suffix = 2
@@ -173,9 +199,11 @@ def create_batch():
             name = f"{stem}-{suffix}.gif"
             suffix += 1
         names.add(name.casefold())
-        files.append((data, name))
+        files.append((upload.stream, name))
     try:
-        status = job_registry.submit_batch(files, overlay_data, opts)
+        status = job_registry.submit_batch(
+            files, overlay.stream, opts, max_file_bytes=app.config["MAX_FILE_LENGTH"],
+        )
     except JobQueueFull:
         return jsonify(error="The job queue is full. Please try again later."), 503
     return jsonify(status), 202

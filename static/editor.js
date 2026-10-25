@@ -4,7 +4,8 @@
   const $ = (id) => document.getElementById(id);
   const config = JSON.parse($("editor-config").textContent);
   const form = $("form");
-  const limit = config.maxUploadMb * 1024 * 1024;
+  const singleLimit = config.maxUploadMb * 1024 * 1024;
+  const fileLimit = config.maxFileMb * 1024 * 1024;
   const layers = {
     gif: { file: null, url: null, dimensions: null },
     overlay: { file: null, url: null, dimensions: null },
@@ -20,6 +21,8 @@
   let batchStatus = null;
   let batchJobUrl = null;
   const batchMode = () => $("batch-mode").checked;
+  const requestMb = () => batchMode() ? config.maxBatchUploadMb : config.maxUploadMb;
+  const requestLimit = () => requestMb() * 1024 * 1024;
   const settings = ["position", "x", "y", "margin", "scale", "opacity", "stretch_overlay",
     "crop_x", "crop_y", "crop_width", "crop_height"];
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -31,7 +34,7 @@
   $("hide-previews").addEventListener("change", updateMotion);
   updateMotion();
   const bytes = (size) => size < 1024 * 1024
-    ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(2)} MB`;
+    ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(2)} MiB`;
   const combinedSize = () => (batchMode()
     ? batchFiles.reduce((sum, file) => sum + file.size, 0) : layers.gif.file?.size || 0)
     + (layers.overlay.file?.size || 0);
@@ -102,15 +105,15 @@
   function update() {
     const total = combinedSize();
     const ready = Boolean(layers.gif.file && layers.overlay.file && (batchMode() ? batchFiles.length : info));
-    $("submit").disabled = busy || !ready || total >= limit || !settingsValid();
+    $("submit").disabled = busy || !ready || total >= requestLimit() || !settingsValid();
     $("submit").textContent = batchMode()
       ? (busy ? "Creating GIFs…" : "Create batch ↗")
       : (busy ? "Creating GIF…" : "Create GIF ↗");
     $("form").setAttribute("aria-busy", String(busy));
     $("size-summary").textContent = total
-      ? `${bytes(total)} combined · ${config.maxUploadMb} MB request limit (plus form data).`
+      ? `${bytes(total)} combined · ${requestMb()} MiB ${batchMode() ? "batch" : "single"} request cap, including form data and multipart overhead. Server validation is authoritative.`
       : "Files stay in this session; uploads are processed on the server.";
-    if (total >= limit) {
+    if (total >= requestLimit()) {
       $("status").textContent = "Files exceed the request budget. Choose smaller files; form data also needs space.";
     } else if (busy) {
       $("status").textContent = exportProgress;
@@ -199,14 +202,14 @@
     $("preview-detail").textContent = `${detail} · Overlay ${ow} × ${oh} px at (${x}, ${y})`;
   }
 
-  async function apiError(response, jobRequest = false) {
+  async function apiError(response, jobRequest = false, uploadMb = config.maxUploadMb) {
     let message = "";
     try {
       const body = await response.json();
       if (typeof body.error === "string") message = body.error;
     } catch { /* Proxies may return HTML or an empty body. Never display it. */ }
     if (response.status === 413) {
-      return `Request too large. All files and form data must fit within ${config.maxUploadMb} MB; the host may impose a smaller limit.`;
+      return `${message || "Request too large."} Each file must be at most ${config.maxFileMb} MiB; this request must fit within ${uploadMb} MiB including form data and multipart overhead. The host may impose a smaller limit.`;
     }
     if (jobRequest && response.status === 404) {
       return `${message || "This export is no longer available."} The job may have expired or the server restarted. Click Create GIF to retry.`;
@@ -230,8 +233,8 @@
     });
   }
 
-  async function readJob(response) {
-    if (!response.ok) throw new Error(await apiError(response, true));
+  async function readJob(response, uploadMb) {
+    if (!response.ok) throw new Error(await apiError(response, true, uploadMb));
     try {
       return await response.json();
     } catch {
@@ -247,6 +250,9 @@
     const data = new FormData();
     data.append("gif", file);
     try {
+      if (file.size >= singleLimit) {
+        throw new Error(`GIF properties require an analysis request under ${config.maxUploadMb} MiB, including multipart overhead, even in batch mode. Choose a smaller GIF to analyze it.`);
+      }
       const response = await fetch(config.analyzeUrl, { method: "POST", body: data, signal: controller.signal });
       if (!response.ok) throw new Error(await apiError(response));
       let result;
@@ -320,6 +326,10 @@
       $(name + "-error").textContent = "This file is empty. Choose another image.";
       return;
     }
+    if (files.some((item) => item.size > fileLimit)) {
+      $(name + "-error").textContent = `Each ${name === "gif" ? "GIF" : "overlay"} must be at most ${config.maxFileMb} MiB. Choose smaller files.`;
+      return;
+    }
     // A missing or misleading MIME is common: extensions are a fallback, not proof.
     if (name === "gif" && files.some((item) => item.type !== "image/gif" && !/\.gif$/i.test(item.name))) {
       $(name + "-error").textContent = "Choose a GIF for the base layer. The server checks its contents.";
@@ -329,8 +339,8 @@
       $(name + "-error").textContent = "Choose an image such as PNG, GIF, JPEG or WebP. The server checks format support.";
       return;
     }
-    if (files.reduce((sum, item) => sum + item.size, 0) + combinedSize() >= limit) {
-      $(name + "-error").textContent = `All files must fit within ${config.maxUploadMb} MB per request, with room for form data. Choose smaller files.`;
+    if (files.reduce((sum, item) => sum + item.size, 0) + combinedSize() >= requestLimit()) {
+      $(name + "-error").textContent = `All files must fit within the ${requestMb()} MiB ${batchMode() ? "batch" : "single"} request cap, with room for form data and multipart overhead. Choose smaller files.`;
       update();
       return;
     }
@@ -417,8 +427,10 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy || (!info && !batchMode()) || !layers.gif.file || !layers.overlay.file || !form.reportValidity()) return;
+    if (busy || (!info && !batchMode()) || !layers.gif.file || !layers.overlay.file
+        || combinedSize() >= requestLimit() || !form.reportValidity()) return;
     const batch = batchMode();
+    const uploadMb = requestMb();
     const jobsUrl = batch ? config.batchesUrl : config.jobsUrl;
     const data = new FormData();
     if (batch) {
@@ -441,15 +453,9 @@
     $("error").textContent = "";
     update();
     try {
-      // Measure the serialized multipart body, including headers, names and boundaries.
-      const request = new Request(jobsUrl, { method: "POST", body: data });
-      const body = await request.blob();
-      if (stale()) return;
-      if (body.size > limit) {
-        throw new Error(`The complete request exceeds ${config.maxUploadMb} MB including form data. Choose smaller files.`);
-      }
-      const created = await fetch(jobsUrl, { method: "POST", body, headers: { "Content-Type": request.headers.get("Content-Type") }, signal: controller.signal });
-      const job = await readJob(created);
+      // Let the browser serialize FormData; the server checks multipart overhead.
+      const created = await fetch(jobsUrl, { method: "POST", body: data, signal: controller.signal });
+      const job = await readJob(created, uploadMb);
       if (stale()) return;
       if (created.status !== 202 || !job || typeof job.job_id !== "string"
           || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.job_id)
@@ -466,7 +472,7 @@
       while (true) {
         await pollDelay(controller.signal);
         if (stale()) return;
-        const status = await readJob(await fetch(jobUrl, { signal: controller.signal }));
+        const status = await readJob(await fetch(jobUrl, { signal: controller.signal }), uploadMb);
         if (stale()) return;
         if (!status || status.job_id !== job.job_id
             || !["queued", "processing", "done", "error", "failed"].includes(status.state)) {

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f6f7fb">
   <title>GIF Overlay — a little layer, a lot of personality</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='editor.css') }}">
-  <script id="editor-config" type="application/json">{{ {'maxUploadMb': max_upload_mb, 'maxBatchFiles': max_batch_files, 'analyzeUrl': url_for('analyze'), 'overlayUrl': url_for('overlay'), 'jobsUrl': url_for('create_job'), 'batchesUrl': url_for('create_batch')} | tojson }}</script>
+  <script id="editor-config" type="application/json">{{ {'maxUploadMb': max_upload_mb, 'maxBatchUploadMb': max_batch_upload_mb, 'maxFileMb': max_file_mb, 'maxBatchFiles': max_batch_files, 'analyzeUrl': url_for('analyze'), 'overlayUrl': url_for('overlay'), 'jobsUrl': url_for('create_job'), 'batchesUrl': url_for('create_batch')} | tojson }}</script>
   <script src="{{ url_for('static', filename='editor.js') }}" defer></script>
 </head>
 <body>
@@ -27,7 +27,7 @@
           <h2><span class="step">01</span> Your layers</h2>
           <label class="motion-control"><input id="batch-mode" type="checkbox" aria-describedby="batch-help"> Batch mode (multiple GIFs)</label>
           <p id="batch-help" class="hint">One overlay and the same settings for every GIF. In batch mode, preview the first file; each file keeps its own dimensions.</p>
-          <p class="hint">Up to {{ max_upload_mb }} MB per request, including all files and form data. Batch limit: {{ max_batch_files }} GIFs.</p>
+          <p class="hint">Each GIF and overlay: up to {{ max_file_mb }} MiB. Single export and analysis: {{ max_upload_mb }} MiB per request. Batch: {{ max_batch_upload_mb }} MiB ({{ (max_batch_upload_mb / 1024) | round(2) }} GiB), up to {{ max_batch_files }} GIFs. Request caps include all files, form data and multipart overhead; the server checks the complete request.</p>
           {% for name, title, help, accept in [('gif', 'Base GIF', 'An animated GIF to start with', '.gif,image/gif'), ('overlay', 'Overlay image', 'PNG, GIF, JPEG, WebP & more', 'image/*')] %}
           <div class="upload-card" id="{{ name }}-zone" data-upload="{{ name }}">
             <div class="upload-heading"><h3>{{ title }}</h3><span class="layer-tag">{{ 'BACKGROUND' if name == 'gif' else 'FOREGROUND' }}</span></div>

@@ -331,7 +331,7 @@ def test_batch_limits_and_unique_names(client, registry, monkeypatch):
     assert names[-1] == "image-overlay.gif"
     registry.max_jobs = 1
     assert client.post("/batches", data=batch_data()).status_code == 503
-    monkeypatch.setitem(app_module.app.config, "MAX_CONTENT_LENGTH", 32)
+    monkeypatch.setitem(app_module.app.config, "MAX_BATCH_CONTENT_LENGTH", 32)
     assert client.post("/batches", data=batch_data()).status_code == 413
 
 
