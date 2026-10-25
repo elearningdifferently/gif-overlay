@@ -98,7 +98,8 @@ def test_default_upload_limit_error(monkeypatch, route):
         content_type="multipart/form-data; boundary=test",
     )
     assert response.status_code == 413
-    assert response.get_json() == {"error": "Upload too large (limit 100 MB)."}
+    assert "total request limit 100 MiB" in response.get_json()["error"]
+    assert "multipart" in response.get_json()["error"]
 
 
 def test_editor_config_and_static_assets(client):
@@ -108,6 +109,8 @@ def test_editor_config_and_static_assets(client):
     page = EditorHTML(response.get_data(as_text=True))
     assert page.config == {
         "maxUploadMb": app_module.MAX_UPLOAD_MB,
+        "maxBatchUploadMb": app_module.MAX_BATCH_UPLOAD_MB,
+        "maxFileMb": app_module.MAX_FILE_MB,
         "maxBatchFiles": 100,
         "analyzeUrl": "/analyze",
         "overlayUrl": "/overlay",

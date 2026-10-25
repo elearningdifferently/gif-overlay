@@ -97,8 +97,9 @@ Unavailable results return HTTP 409, and unknown/expired IDs return HTTP 404.
 ZIP creation copies files in chunks to an automatically deleted temporary
 archive, then streams that archive to the client without loading it into RAM.
 Each batch occupies one registry slot and processes its files sequentially
-on the existing worker to bound rendering memory. The upload limit covers
-the entire batch request; the pixel limit applies separately to each GIF.
+on the existing worker to bound rendering memory. The batch upload limit covers
+the entire batch request; the per-file cap covers every GIF and the overlay,
+and the pixel limit applies separately to each GIF.
 Batch results expire together 15 minutes after the last file finishes.
 
 **Keep `--workers 1` in the Procfile and exactly one App Platform instance.**
@@ -110,12 +111,14 @@ deadline: rendering no longer holds an HTTP request open. Uploads, analysis,
 and result transfers still have hosting limits. Background work does not
 increase rendering speed or eliminate CPU/memory limits.
 
-Uploads are saved in private temporary directories, then deleted as soon as
-rendering succeeds or fails. Completed results and failed-job metadata expire
+Uploads are staged on disk in private temporary directories rather than retained
+as whole-request byte buffers in application memory, then deleted as soon as
+rendering succeeds or fails. Multipart parsing may still use bounded buffers.
+Completed results and failed-job metadata expire
 **15 minutes after processing finishes**; cleanup runs every 30 seconds and
 on job requests, with best-effort shutdown cleanup. There is a limit of **16
 retained jobs**, including queued, processing and recently finished jobs; new
-submissions receive HTTP 503 when full. The existing upload and pixel limits
+submissions receive HTTP 503 when full. The configured upload and pixel limits
 still apply. Numeric/settings validation happens on submission; image decoding
 and pixel-budget validation happen in the background and can yield an error job.
 
@@ -127,6 +130,17 @@ browser polling and ignores stale results, but does not cancel server rendering;
 abandoned jobs still finish and expire. Job UUIDs are anonymous bearer links:
 anyone with a UUID can retrieve its status/result until expiry; do not share it.
 No upload paths are exposed in status responses.
+
+**Capacity planning:** disk staging does not make large batches free. Queued
+uploads, in-progress renders, retained outputs and temporary ZIP archives share
+the instance's ephemeral disk; concurrent jobs can exhaust it before the job
+count limit is reached. Provision and monitor sufficient free disk and leave
+headroom for outputs and archives, or lower the caps. Decoded frames, compositing
+and encoding still consume rendering memory; a 1 GiB upload cap is not a promise
+that a 1 GiB-memory instance can render every accepted image. Reverse-proxy body
+limits and upload/analysis/download timeouts may reject requests below the app
+caps. The app spec is configuration guidance, not evidence of a deployment or
+verification of provider limits.
 
 ### Troubleshooting an App Platform hostname that does not resolve
 
@@ -179,16 +193,23 @@ public hostname exists or is routed correctly. Preserve the existing
 
 | Variable        | Default     | Description                                          |
 |-----------------|-------------|------------------------------------------------------|
-| `MAX_UPLOAD_MB` | `100`       | Per-request combined upload cap in MiB, including multipart overhead and form fields. |
+| `MAX_UPLOAD_MB` | `100`       | Single-request cap in MiB for `/analyze`, `/jobs` and legacy `/overlay`, including multipart overhead and form fields. |
+| `MAX_BATCH_UPLOAD_MB` | `1024` | Batch-request cap in MiB for `/batches` (1 GiB by default), including every GIF, the shared overlay, multipart overhead and form fields. |
+| `MAX_FILE_MB`   | `100`       | Per-file cap in MiB for each GIF and overlay; a file exactly at the cap is allowed if its complete request fits. |
 | `MAX_PIXELS`    | `950000000` | Max `width × height × frames` of a GIF (memory cap). |
 | `PORT`          | `8080`      | Port to listen on (set by App Platform).             |
 
-The upload cap is **not per file**: `/jobs` (and legacy `/overlay`) must fit the GIF, overlay,
-options and multipart headers/boundaries into the same request budget.
+Request caps are **separate from the per-file cap**: `/jobs` (and legacy `/overlay`)
+must fit the GIF, overlay, options and multipart headers/boundaries into the
+single-request budget. `/batches` uses the larger batch budget. `/analyze` always
+uses the single-request budget, even when analyzing the first GIF in batch mode.
 Two individually acceptable files can exceed it together, and files whose
 combined bytes equal the cap leave no room for multipart overhead. Over-limit
-requests return HTTP 413 with a JSON error. The pixel cap is a separate
-image-processing memory safeguard.
+requests return HTTP 413 with a JSON error. The browser checks individual file
+sizes and combined file bytes, then submits FormData directly without building a
+full multipart Blob to measure it. These checks cannot account for exact
+multipart overhead: server validation is authoritative. The pixel cap is a
+separate image-processing memory safeguard.
 
 ## API
 
@@ -232,6 +253,12 @@ image-processing memory safeguard.
   excessive combined uploads and invalid numeric options. Simulate an offline
   connection, a server failure and a non-JSON error response; show an actionable
   error, clear busy state and allow retry without stale downloads.
+- **Upload budgets:** in batch mode, select several individually valid files
+  whose combined size exceeds 100 MiB but stays below 1 GiB (default caps).
+  Check that single mode still enforces 100 MiB, each GIF and the overlay reject
+  sizes above 100 MiB but not exactly 100 MiB, and analysis always uses 100 MiB.
+  Allow space for multipart overhead; verify server HTTP 413 errors remain
+  helpful near request boundaries. Repeat after switching modes and resetting.
 
 Native file-dialog interaction and real mobile/cross-browser behavior remain
 manually unverified; browser automation and viewport emulation do not replace

@@ -17,5 +17,9 @@ services:
     envs:
       - key: MAX_UPLOAD_MB
         value: "100"
+      - key: MAX_BATCH_UPLOAD_MB
+        value: "1024"
+      - key: MAX_FILE_MB
+        value: "100"
       - key: MAX_PIXELS
         value: "950000000"
